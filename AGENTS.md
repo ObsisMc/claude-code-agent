@@ -247,11 +247,13 @@ semantically identical it looks. `tests/main_test.ts` pins that digest, so
 reformatting the file is a conscious, release-affecting change — not something
 formatting can do silently.
 
-The declaration is inert until a release binds it. `deno task package
---agent-configuration` writes the static copy (`dist/agent-configuration.json`,
-attached to the release and copied into the registry entry beside `orax.toml`)
-and the `[agent_configuration]` section into `manifest.toml`; without the
-flag, packages still carry the bytes and nothing else claims them.
+The declaration is inert until a release binds it.
+`deno task package
+--agent-configuration` writes the static copy
+(`dist/agent-configuration.json`, attached to the release and copied into the
+registry entry beside `orax.toml`) and the `[agent_configuration]` section into
+`manifest.toml`; without the flag, packages still carry the bytes and nothing
+else claims them.
 
 **The flag exists because publish order is constrained by host support.** Older
 Ora hosts ignore a section they do not know and would install the release
@@ -260,10 +262,10 @@ section exists to provide. `release.yml` passes the flag only once the hosts
 resolving `[agent_configuration]` are deployed; that is an owner decision made
 by editing one line, not something this repository can detect.
 
-The packaging script deliberately does not interpret the declaration's shape:
-it checks readable UTF-8, the 256 KiB size bound every host enforces, and reads
+The packaging script deliberately does not interpret the declaration's shape: it
+checks readable UTF-8, the 256 KiB size bound every host enforces, and reads
 `schemaVersion` — the one number the section needs — from the bytes themselves.
-Whether the declaration is *legal* is proven by the host compilers at
+Whether the declaration is _legal_ is proven by the host compilers at
 marketplace sync and at install, from the same shared cross-language samples;
 re-implementing that judgment here would only ever drift from it.
 
