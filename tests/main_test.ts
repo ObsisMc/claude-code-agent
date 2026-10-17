@@ -21,7 +21,7 @@ import {
   bundledAdapterPath,
   bundledClaudePath,
 } from "../src/services/bundled-binary.ts";
-import { releaseManifest } from "../scripts/package.ts";
+import { declarationAssociation, releaseManifest } from "../scripts/package.ts";
 import {
   ClaudeClient,
   type SpawnedProcess,
@@ -94,6 +94,85 @@ sha256 = "bb"
     false,
   );
   assertEquals(rendered.includes("[artifact]"), false);
+});
+
+Deno.test("the shipped declaration is the pinned personal-model shape", async () => {
+  const bytes = await Deno.readFile(
+    new URL("../assets/config.json", import.meta.url),
+  );
+  const association = await declarationAssociation(bytes);
+  assertEquals(association.schemaVersion, 2);
+  // The digest is the declaration's published identity, byte-pinned against the shared
+  // cross-language contract samples: reformatting the file is a release-affecting change that
+  // this test exists to force someone to notice, not something formatting can do silently.
+  assertEquals(
+    association.declarationSha256,
+    "2d1afa5e03b476385a6c188f7444184be11e82e81191d8efe2e9f354456753c1",
+  );
+  assertEquals(association.copy, "agent-configuration.json");
+});
+
+Deno.test("a declaration no host compiler would accept cannot be bound", async () => {
+  const encode = (text: string) => new TextEncoder().encode(text);
+  // The packaging script does not re-implement the declaration schema; these are the checks it
+  // owns — readable UTF-8, a positive integer schemaVersion, and the size bound every host
+  // enforces — and anything beyond them is left to the host compilers at sync and install.
+  await assertRejects(
+    () => declarationAssociation(encode("not json at all")),
+    Error,
+  );
+  await assertRejects(
+    () => declarationAssociation(encode('{"agent":{}}')),
+    Error,
+  );
+  await assertRejects(
+    () => declarationAssociation(encode('{"schemaVersion":0}')),
+    Error,
+  );
+  await assertRejects(
+    () => declarationAssociation(new Uint8Array(256 * 1024 + 1)),
+    Error,
+  );
+});
+
+Deno.test("the release manifest binds the declaration before its targets", () => {
+  const rendered = releaseManifest(
+    [
+      "resolver = 1",
+      'identifier = "ora-space.claude"',
+      'version = "0.3.0"',
+    ].join("\n"),
+    [
+      {
+        triple: "x86_64-pc-windows-msvc",
+        url: "https://example.invalid/a.orax",
+        sha256: "aa",
+      },
+    ],
+    {
+      schemaVersion: 2,
+      declarationSha256:
+        "2d1afa5e03b476385a6c188f7444184be11e82e81191d8efe2e9f354456753c1",
+      copy: "agent-configuration.json",
+    },
+  );
+  assertEquals(
+    rendered,
+    `resolver = 1
+identifier = "ora-space.claude"
+version = "0.3.0"
+
+[agent_configuration]
+schema_version = 2
+declaration_sha256 = "2d1afa5e03b476385a6c188f7444184be11e82e81191d8efe2e9f354456753c1"
+copy = "agent-configuration.json"
+
+[[targets]]
+target = "x86_64-pc-windows-msvc"
+url = "https://example.invalid/a.orax"
+sha256 = "aa"
+`,
+  );
 });
 
 Deno.test("both bundled binaries land where each consumer looks for them", () => {

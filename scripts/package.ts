@@ -11,13 +11,22 @@
  *   deno task package                                  # every target, tag from orax.toml
  *   deno task package --target x86_64-pc-windows-msvc  # just one, for a local install
  *   deno task package --tag v0.73.0 --repo owner/name  # what CI runs, and what writes a manifest
+ *   deno task package --tag v0.73.0 --repo owner/name --agent-configuration
+ *                                                      # also bind the Agent declaration
  *
  * Produces `dist/packages/<identifier>-<tag>-<triple>.orax`, plus `dist/manifest.toml` — the
- * release form of the manifest the marketplace index needs — when a repository is named.
+ * release form of the manifest the marketplace index needs — when a repository is named. With
+ * `--agent-configuration` it also writes `dist/agent-configuration.json`, the static copy the
+ * marketplace reads beside the entry; pass it only once the Ora hosts resolving an
+ * `[agent_configuration]` section are deployed, because older hosts ignore the section and
+ * would install the release without proving the declaration binding. The declaration bytes
+ * themselves ship in every package either way: they are inert metadata until a release binds
+ * them.
  */
 import { parseArgs } from "@std/cli/parse-args";
+import { encodeHex } from "@std/encoding";
 import { basename, dirname, join, relative } from "@std/path";
-import { Reader, ZipWriter } from "@zip-js/zip-js";
+import { FileEntry, Reader, ZipReader, ZipWriter } from "@zip-js/zip-js";
 import bundle from "../bundle.config.ts";
 import {
   downloadVerified,
@@ -61,6 +70,15 @@ const DOWNLOAD_DIR = join(DIST, "download");
 const STAGE_DIR = join(DIST, "stage");
 /** Where the adapter's npm dependencies are installed so Bun can compile against them. */
 const ADAPTER_DIR = join(DIST, "adapter");
+
+/** Package-relative path of the Agent declaration every package carries. */
+const DECLARATION_ENTRY = "assets/config.json";
+
+/** The static copy's name, both as a release asset and inside a marketplace registry entry. */
+const DECLARATION_COPY = "agent-configuration.json";
+
+/** The declaration size bound the host's compiler enforces; a larger file could never install. */
+const MAX_DECLARATION_BYTES = 256 * 1024;
 
 /**
  * Smallest plausible size for each staged binary, as a guard against staging nothing at all.
@@ -271,6 +289,9 @@ async function findLogoFiles(): Promise<string[]> {
  *
  * `target` is the triple the package self-declares in `[artifact]`, which is what lets Ora verify
  * after extraction that the package it downloaded is really the one built for this machine.
+ * The Agent declaration is required rather than optional: this repository publishes a
+ * personal-model agent, and a package quietly missing its declaration could only ever surface
+ * as a release whose configuration surface behaves differently from its siblings.
  */
 async function stagePluginFiles(target: string): Promise<void> {
   await Deno.mkdir(STAGE_DIR, { recursive: true });
@@ -278,6 +299,10 @@ async function stagePluginFiles(target: string): Promise<void> {
   for (const extra of [...await findLogoFiles(), "README.md"]) {
     await Deno.copyFile(extra, join(STAGE_DIR, extra)).catch(() => {});
   }
+  await Deno.mkdir(dirname(join(STAGE_DIR, DECLARATION_ENTRY)), {
+    recursive: true,
+  });
+  await Deno.copyFile(DECLARATION_ENTRY, join(STAGE_DIR, DECLARATION_ENTRY));
   const manifest = (await Deno.readTextFile("orax.toml")).trimEnd();
   await Deno.writeTextFile(
     join(STAGE_DIR, "orax.toml"),
@@ -402,6 +427,87 @@ function relativeSlashPath(root: string, path: string): string {
   return relative(root, path).replaceAll("\\", "/");
 }
 
+/**
+ * Reads the declaration bytes back out of a built package.
+ *
+ * The release association is derived from what the archive actually carries, not from the file
+ * that was staged into it: reading the entry back is what proves the copy a marketplace will
+ * publish is byte-identical to the declaration every target installs. The central-directory
+ * lookup makes this cheap even on packages of a few hundred megabytes.
+ */
+async function packagedDeclaration(
+  archive: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const reader = new FileReader(archive);
+  const zip = new ZipReader(reader);
+  try {
+    const entry = (await zip.getEntries()).find(
+      (candidate): candidate is FileEntry =>
+        candidate.filename === DECLARATION_ENTRY && !candidate.directory,
+    );
+    if (entry === undefined) {
+      throw new Error(`${archive} carries no ${DECLARATION_ENTRY}`);
+    }
+    return new Uint8Array(await entry.arrayBuffer());
+  } finally {
+    await zip.close();
+    reader.close();
+  }
+}
+
+/** One release's verified Agent declaration, as the marketplace entry binds it. */
+export interface AgentConfigurationAssociation {
+  /** Declaration schema version the published copy declares. */
+  schemaVersion: number;
+  /** Lowercase hex SHA-256 of the exact declaration bytes every package of this release carries. */
+  declarationSha256: string;
+  /** Registry-entry-relative path of the static copy the marketplace sync reads. */
+  copy: string;
+}
+
+/** Renders a SHA-256 digest as lowercase hex, the same spelling `upstream.ts` records. */
+async function sha256Bytes(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  return encodeHex(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+  );
+}
+
+/**
+ * Builds the release association from the bytes the packages actually carry.
+ *
+ * The digest is over the exact bytes, so a reformatted declaration is a different release
+ * identity by construction. The schema version is read from the declaration itself — the one
+ * source that cannot drift from the bytes — without this script interpreting any other part of
+ * the shape: whether the declaration is *legal* is proven by the host compilers at marketplace
+ * sync and install, not re-invented here.
+ */
+export async function declarationAssociation(
+  declaration: Uint8Array<ArrayBuffer>,
+): Promise<AgentConfigurationAssociation> {
+  if (declaration.byteLength > MAX_DECLARATION_BYTES) {
+    throw new Error(
+      `${DECLARATION_ENTRY} is ${declaration.byteLength} bytes, over the ` +
+        `${MAX_DECLARATION_BYTES}-byte bound every host enforces`,
+    );
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(declaration);
+  const parsed = JSON.parse(text) as { schemaVersion?: unknown };
+  if (
+    typeof parsed !== "object" || parsed === null ||
+    typeof parsed.schemaVersion !== "number" ||
+    !Number.isSafeInteger(parsed.schemaVersion) || parsed.schemaVersion < 1
+  ) {
+    throw new Error(
+      `${DECLARATION_ENTRY} declares no positive integer schemaVersion`,
+    );
+  }
+  return {
+    schemaVersion: parsed.schemaVersion,
+    declarationSha256: await sha256Bytes(declaration),
+    copy: DECLARATION_COPY,
+  };
+}
+
 /** One built package, as the release form of the manifest advertises it. */
 export interface ReleaseTarget {
   /** The canonical Rust triple this package installs on. */
@@ -415,13 +521,18 @@ export interface ReleaseTarget {
  * Renders the release form of the manifest, which is what a marketplace entry is copied from.
  *
  * It is the installed manifest verbatim plus one `[[targets]]` block per package, and the whole
- * file is meant to be pasted into the registry as-is. Three properties of that shape are load
+ * file is meant to be pasted into the registry as-is. Four properties of that shape are load
  * bearing rather than cosmetic, and the host rejects a manifest that breaks any of them:
  *
  * - `[[targets]]` and a top-level `url`/`sha256` pair are **mutually exclusive** — one describes
  *   per-target packages and the other a universal one, and a manifest carrying both would leave
  *   download precedence ambiguous. This plugin ships per-target packages, so it emits only the
  *   former.
+ * - A `[agent_configuration]` section, when one is given, binds the declaration digest every
+ *   package of this release carries to the registry-relative copy path. It renders before the
+ *   `[[targets]]` blocks, like every top-level table, and a release only carries it once the
+ *   hosts resolving it are deployed — older hosts ignore the section and would install without
+ *   proving the binding.
  * - The blocks come **after** every top-level key. TOML binds a bare key to the table header above
  *   it, so a field appended below `[[targets]]` would silently become part of that target rather
  *   than of the plugin.
@@ -432,12 +543,18 @@ export interface ReleaseTarget {
 export function releaseManifest(
   installed: string,
   targets: readonly ReleaseTarget[],
+  agentConfiguration?: AgentConfigurationAssociation,
 ): string {
   const blocks = targets.map((target) =>
     `[[targets]]\ntarget = "${target.triple}"\nurl = "${target.url}"\n` +
     `sha256 = "${target.sha256}"`
   );
-  return `${[installed.trimEnd(), ...blocks].join("\n\n")}\n`;
+  const association = agentConfiguration === undefined
+    ? ""
+    : `\n\n[agent_configuration]\nschema_version = ${agentConfiguration.schemaVersion}\n` +
+      `declaration_sha256 = "${agentConfiguration.declarationSha256}"\n` +
+      `copy = "${agentConfiguration.copy}"`;
+  return `${[installed.trimEnd() + association, ...blocks].join("\n\n")}\n`;
 }
 
 /** Stages one target's package tree, both binaries included, and zips it into a `.orax`. */
@@ -455,7 +572,10 @@ async function buildPackage(plan: TargetPlan, fileName: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const flags = parseArgs(Deno.args, { string: ["tag", "repo", "target"] });
+  const flags = parseArgs(Deno.args, {
+    string: ["tag", "repo", "target"],
+    boolean: ["agent-configuration"],
+  });
   const version = await manifestField("version");
   const tag = flags.tag ?? Deno.env.get("GITHUB_REF_NAME") ?? `v${version}`;
   const repo = flags.repo ?? Deno.env.get("GITHUB_REPOSITORY");
@@ -477,6 +597,9 @@ async function main(): Promise<void> {
     ? undefined
     : `https://github.com/${repo}/releases/download/${tag}`;
   const released: ReleaseTarget[] = [];
+  // Every target must carry the same declaration bytes: the release binds one digest for all of
+  // its packages, so a target whose bytes drifted is a broken release, not a variant.
+  let declaration: Uint8Array<ArrayBuffer> | undefined;
 
   for (const triple of triples) {
     const target = config.targets[triple];
@@ -498,6 +621,15 @@ async function main(): Promise<void> {
     await buildPackage(plan, fileName);
 
     const path = join(PACKAGES_DIR, fileName);
+    const packaged = await packagedDeclaration(path);
+    if (declaration === undefined) {
+      declaration = packaged;
+    } else if (!bytesEqual(declaration, packaged)) {
+      throw new Error(
+        `${fileName} carries declaration bytes that differ from an earlier target; one ` +
+          `release binds exactly one declaration`,
+      );
+    }
     const digest = await sha256File(path);
     const { size } = await Deno.stat(path);
     if (base !== undefined) {
@@ -514,13 +646,38 @@ async function main(): Promise<void> {
   // committed — and only when a repository is named, since a partial local build would otherwise
   // write a manifest advertising targets it did not build.
   if (base !== undefined && flags.target === undefined) {
+    // The association is emitted only when the caller says the deployed hosts resolve it; the
+    // declaration bytes themselves already ship in every package either way.
+    let association: AgentConfigurationAssociation | undefined;
+    if (flags["agent-configuration"]) {
+      if (declaration === undefined) {
+        throw new Error(
+          "no packages were built; none carries a declaration to bind",
+        );
+      }
+      association = await declarationAssociation(declaration);
+      await Deno.writeFile(join(DIST, DECLARATION_COPY), declaration);
+      console.log(
+        `bound agent declaration ${association.declarationSha256} as ${DECLARATION_COPY}`,
+      );
+    }
     const path = join(DIST, "manifest.toml");
     await Deno.writeTextFile(
       path,
-      releaseManifest(await Deno.readTextFile("orax.toml"), released),
+      releaseManifest(
+        await Deno.readTextFile("orax.toml"),
+        released,
+        association,
+      ),
     );
     console.log(`\nwrote ${path}`);
   }
+}
+
+/** Compares two byte sequences; `Uint8Array` has no equality of its own. */
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength &&
+    left.every((byte, index) => byte === right[index]);
 }
 
 if (import.meta.main) {
