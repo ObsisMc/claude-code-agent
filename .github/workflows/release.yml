@@ -69,6 +69,10 @@ jobs:
 
       # Writes dist/packages/*.orax (one per target in bundle.config.ts) and dist/manifest.toml,
       # reproducing exactly what upstream.lock.json records and verifying every download against it.
+      # Every package also carries assets/config.json, the Agent declaration; the release binds it
+      # only when `--agent-configuration` is passed, and that flag waits until the Ora hosts that
+      # resolve an `[agent_configuration]` section are deployed — older hosts ignore the section
+      # and would install without proving the declaration binding.
       - name: Package
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -87,7 +91,12 @@ jobs:
             printf 'Each `.orax` carries both binaries and installs only on the target it was '
             printf 'built for. `manifest.toml` is the release form the marketplace index reads.\n'
           } > notes.md
-          gh release create "$TAG" dist/packages/*.orax dist/manifest.toml \
+          ASSETS=(dist/packages/*.orax dist/manifest.toml)
+          # The static declaration copy only exists when the release bound one.
+          if [ -f dist/agent-configuration.json ]; then
+            ASSETS+=(dist/agent-configuration.json)
+          fi
+          gh release create "$TAG" "${ASSETS[@]}" \
             --title "$TAG" --notes-file notes.md --generate-notes
 
       # `dist/manifest.toml` is copied verbatim into the marketplace registry, so it is put in the
@@ -106,6 +115,17 @@ jobs:
             cat dist/manifest.toml
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f dist/agent-configuration.json ]; then
+            {
+              echo
+              echo "And the declaration copy the entry's \`[agent_configuration]\` names, as"
+              echo "\`registry/${ID:0:1}/${ID}/agent-configuration.json\`:"
+              echo
+              echo '```json'
+              cat dist/agent-configuration.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # A direct call, not the `release` event: `gh release create` above uses this run's own
   # `GITHUB_TOKEN`, and GitHub does not fire `release` events for another workflow to catch when
