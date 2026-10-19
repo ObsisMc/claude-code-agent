@@ -12,16 +12,19 @@
  *   deno task package --target x86_64-pc-windows-msvc  # just one, for a local install
  *   deno task package --tag v0.73.0 --repo owner/name  # what CI runs, and what writes a manifest
  *   deno task package --tag v0.73.0 --repo owner/name --agent-configuration
- *                                                      # also bind the Agent declaration
+ *                                                      # also ship and bind the Agent declaration
  *
  * Produces `dist/packages/<identifier>-<tag>-<triple>.orax`, plus `dist/manifest.toml` — the
- * release form of the manifest the marketplace index needs — when a repository is named. With
- * `--agent-configuration` it also writes `dist/agent-configuration.json`, the static copy the
- * marketplace reads beside the entry; pass it only once the Ora hosts resolving an
- * `[agent_configuration]` section are deployed, because older hosts ignore the section and
- * would install the release without proving the declaration binding. The declaration bytes
- * themselves ship in every package either way: they are inert metadata until a release binds
- * them.
+ * release form of the manifest the marketplace index needs — when a repository is named.
+ * `--agent-configuration` is the publish-order switch for the Agent declaration: with it, every
+ * package carries `assets/config.json`, the release manifest gains its `[agent_configuration]`
+ * section, and `dist/agent-configuration.json` (the static copy the marketplace reads beside the
+ * entry) is written. Without it, packages carry no declaration at all and current Ora hosts
+ * install the release exactly as before: an `agent`-kind package whose declaration the host
+ * cannot compile installs fine but refuses to activate, so shipping the bytes before the hosts
+ * that resolve them are deployed would publish a plugin that installs and then does not start.
+ * Flip the flag only once those hosts are deployed; that is an owner decision made by editing
+ * one line, not something this repository can detect.
  */
 import { parseArgs } from "@std/cli/parse-args";
 import { encodeHex } from "@std/encoding";
@@ -71,7 +74,7 @@ const STAGE_DIR = join(DIST, "stage");
 /** Where the adapter's npm dependencies are installed so Bun can compile against them. */
 const ADAPTER_DIR = join(DIST, "adapter");
 
-/** Package-relative path of the Agent declaration every package carries. */
+/** Package-relative path of the Agent declaration a release carries when it binds one. */
 const DECLARATION_ENTRY = "assets/config.json";
 
 /** The static copy's name, both as a release asset and inside a marketplace registry entry. */
@@ -289,20 +292,25 @@ async function findLogoFiles(): Promise<string[]> {
  *
  * `target` is the triple the package self-declares in `[artifact]`, which is what lets Ora verify
  * after extraction that the package it downloaded is really the one built for this machine.
- * The Agent declaration is required rather than optional: this repository publishes a
- * personal-model agent, and a package quietly missing its declaration could only ever surface
- * as a release whose configuration surface behaves differently from its siblings.
+ * `includeDeclaration` is the `--agent-configuration` switch: the declaration only ships once
+ * the hosts that resolve it are deployed, because current hosts install an `agent`-kind package
+ * carrying it but then refuse to activate the plugin.
  */
-async function stagePluginFiles(target: string): Promise<void> {
+async function stagePluginFiles(
+  target: string,
+  includeDeclaration: boolean,
+): Promise<void> {
   await Deno.mkdir(STAGE_DIR, { recursive: true });
   await Deno.copyFile(join(DIST, "main.js"), join(STAGE_DIR, "main.js"));
   for (const extra of [...await findLogoFiles(), "README.md"]) {
     await Deno.copyFile(extra, join(STAGE_DIR, extra)).catch(() => {});
   }
-  await Deno.mkdir(dirname(join(STAGE_DIR, DECLARATION_ENTRY)), {
-    recursive: true,
-  });
-  await Deno.copyFile(DECLARATION_ENTRY, join(STAGE_DIR, DECLARATION_ENTRY));
+  if (includeDeclaration) {
+    await Deno.mkdir(dirname(join(STAGE_DIR, DECLARATION_ENTRY)), {
+      recursive: true,
+    });
+    await Deno.copyFile(DECLARATION_ENTRY, join(STAGE_DIR, DECLARATION_ENTRY));
+  }
   const manifest = (await Deno.readTextFile("orax.toml")).trimEnd();
   await Deno.writeTextFile(
     join(STAGE_DIR, "orax.toml"),
@@ -428,16 +436,18 @@ function relativeSlashPath(root: string, path: string): string {
 }
 
 /**
- * Reads the declaration bytes back out of a built package.
+ * Reads the declaration bytes back out of a built package, or `undefined` when it carries none.
  *
  * The release association is derived from what the archive actually carries, not from the file
  * that was staged into it: reading the entry back is what proves the copy a marketplace will
  * publish is byte-identical to the declaration every target installs. The central-directory
- * lookup makes this cheap even on packages of a few hundred megabytes.
+ * lookup makes this cheap even on packages of a few hundred megabytes. Absence is a valid
+ * result — a release built without `--agent-configuration` ships no declaration at all — so
+ * the caller enforces which of the two states the release is allowed to be in.
  */
-async function packagedDeclaration(
+export async function packagedDeclaration(
   archive: string,
-): Promise<Uint8Array<ArrayBuffer>> {
+): Promise<Uint8Array<ArrayBuffer> | undefined> {
   const reader = new FileReader(archive);
   const zip = new ZipReader(reader);
   try {
@@ -445,10 +455,9 @@ async function packagedDeclaration(
       (candidate): candidate is FileEntry =>
         candidate.filename === DECLARATION_ENTRY && !candidate.directory,
     );
-    if (entry === undefined) {
-      throw new Error(`${archive} carries no ${DECLARATION_ENTRY}`);
-    }
-    return new Uint8Array(await entry.arrayBuffer());
+    return entry === undefined
+      ? undefined
+      : new Uint8Array(await entry.arrayBuffer());
   } finally {
     await zip.close();
     reader.close();
@@ -558,11 +567,15 @@ export function releaseManifest(
 }
 
 /** Stages one target's package tree, both binaries included, and zips it into a `.orax`. */
-async function buildPackage(plan: TargetPlan, fileName: string): Promise<void> {
+async function buildPackage(
+  plan: TargetPlan,
+  fileName: string,
+  includeDeclaration: boolean,
+): Promise<void> {
   await Deno.remove(STAGE_DIR, { recursive: true }).catch(() => {});
   await compileAdapter(plan, join(STAGE_DIR, plan.adapterPath));
   await stageClaude(plan, join(STAGE_DIR, plan.claudePath));
-  await stagePluginFiles(plan.triple);
+  await stagePluginFiles(plan.triple, includeDeclaration);
   await writeOrax(
     STAGE_DIR,
     join(PACKAGES_DIR, fileName),
@@ -597,8 +610,13 @@ async function main(): Promise<void> {
     ? undefined
     : `https://github.com/${repo}/releases/download/${tag}`;
   const released: ReleaseTarget[] = [];
-  // Every target must carry the same declaration bytes: the release binds one digest for all of
-  // its packages, so a target whose bytes drifted is a broken release, not a variant.
+  const includeDeclaration = flags["agent-configuration"];
+  // When the release binds a declaration, every target must carry the same bytes: the release
+  // binds one digest for all of its packages, so a target whose bytes drifted is a broken
+  // release, not a variant. When it does not, no target may carry one: current Ora hosts
+  // install an `agent`-kind package carrying an unresolvable declaration but then refuse to
+  // activate the plugin, so the bytes must not ship before the hosts that resolve them are
+  // deployed.
   let declaration: Uint8Array<ArrayBuffer> | undefined;
 
   for (const triple of triples) {
@@ -618,16 +636,29 @@ async function main(): Promise<void> {
       claudePath: config.claudePath(target.os),
     };
     const fileName = `${identifier}-${tag}-${triple}.orax`;
-    await buildPackage(plan, fileName);
+    await buildPackage(plan, fileName, includeDeclaration);
 
     const path = join(PACKAGES_DIR, fileName);
     const packaged = await packagedDeclaration(path);
-    if (declaration === undefined) {
-      declaration = packaged;
-    } else if (!bytesEqual(declaration, packaged)) {
+    if (includeDeclaration) {
+      if (packaged === undefined) {
+        throw new Error(
+          `${fileName} carries no ${DECLARATION_ENTRY}; a release binding a declaration ` +
+            `must ship it in every package`,
+        );
+      }
+      if (declaration === undefined) {
+        declaration = packaged;
+      } else if (!bytesEqual(declaration, packaged)) {
+        throw new Error(
+          `${fileName} carries declaration bytes that differ from an earlier target; one ` +
+            `release binds exactly one declaration`,
+        );
+      }
+    } else if (packaged !== undefined) {
       throw new Error(
-        `${fileName} carries declaration bytes that differ from an earlier target; one ` +
-          `release binds exactly one declaration`,
+        `${fileName} carries ${DECLARATION_ENTRY} without --agent-configuration; current ` +
+          `Ora hosts install such a package but then refuse to activate the plugin`,
       );
     }
     const digest = await sha256File(path);
@@ -646,10 +677,10 @@ async function main(): Promise<void> {
   // committed — and only when a repository is named, since a partial local build would otherwise
   // write a manifest advertising targets it did not build.
   if (base !== undefined && flags.target === undefined) {
-    // The association is emitted only when the caller says the deployed hosts resolve it; the
-    // declaration bytes themselves already ship in every package either way.
+    // The declaration and its association ship together, only when the caller says the hosts
+    // resolving them are deployed; without the flag the packages carry no declaration at all.
     let association: AgentConfigurationAssociation | undefined;
-    if (flags["agent-configuration"]) {
+    if (includeDeclaration) {
       if (declaration === undefined) {
         throw new Error(
           "no packages were built; none carries a declaration to bind",

@@ -21,7 +21,8 @@ import {
   bundledAdapterPath,
   bundledClaudePath,
 } from "../src/services/bundled-binary.ts";
-import { declarationAssociation, releaseManifest } from "../scripts/package.ts";
+import { declarationAssociation, packagedDeclaration, releaseManifest } from "../scripts/package.ts";
+import { BlobReader, ZipWriter } from "@zip-js/zip-js";
 import {
   ClaudeClient,
   type SpawnedProcess,
@@ -110,6 +111,46 @@ Deno.test("the shipped declaration is the pinned personal-model shape", async ()
     "2d1afa5e03b476385a6c188f7444184be11e82e81191d8efe2e9f354456753c1",
   );
   assertEquals(association.copy, "agent-configuration.json");
+});
+
+Deno.test("packagedDeclaration reads bound bytes back, and reports their absence", async () => {
+  // The read-back is what makes the release association derived from the archive's own bytes;
+  // its absence is a valid state, because a release built without `--agent-configuration`
+  // ships no declaration at all — current Ora hosts install such a package as before, while
+  // one carrying the declaration would install and then refuse to activate.
+  const encode = (text: string) => new TextEncoder().encode(text);
+  const declaration = encode('{"schemaVersion":2}');
+  const writePackage = async (
+    entries: [string, Uint8Array<ArrayBuffer>][],
+  ) => {
+    const path = await Deno.makeTempFile();
+    const file = await Deno.open(path, { write: true, truncate: true });
+    const writer = new ZipWriter(file.writable);
+    for (const [name, bytes] of entries) {
+      await writer.add(name, new BlobReader(new Blob([bytes])));
+    }
+    await writer.close();
+    return path;
+  };
+
+  const bound = await writePackage([
+    ["orax.toml", encode("resolver = 1")],
+    ["assets/config.json", declaration],
+  ]);
+  try {
+    assertEquals(await packagedDeclaration(bound), declaration);
+  } finally {
+    await Deno.remove(bound);
+  }
+
+  const unbound = await writePackage([
+    ["orax.toml", encode("resolver = 1")],
+  ]);
+  try {
+    assertEquals(await packagedDeclaration(unbound), undefined);
+  } finally {
+    await Deno.remove(unbound);
+  }
 });
 
 Deno.test("a declaration no host compiler would accept cannot be bound", async () => {
