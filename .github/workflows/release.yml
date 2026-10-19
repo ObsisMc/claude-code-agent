@@ -69,10 +69,10 @@ jobs:
 
       # Writes dist/packages/*.orax (one per target in bundle.config.ts) and dist/manifest.toml,
       # reproducing exactly what upstream.lock.json records and verifying every download against it.
-      # Every package also carries assets/config.json, the Agent declaration; the release binds it
-      # only when `--agent-configuration` is passed, and that flag waits until the Ora hosts that
-      # resolve an `[agent_configuration]` section are deployed — older hosts ignore the section
-      # and would install without proving the declaration binding.
+      # With `--agent-configuration` every package carries assets/config.json, the Agent
+      # declaration, and the release binds it; the flag waits until the Ora hosts that resolve
+      # the declaration are deployed — current hosts install an `agent`-kind package carrying
+      # it but then refuse to activate the plugin, so the bytes must not ship early.
       - name: Package
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
