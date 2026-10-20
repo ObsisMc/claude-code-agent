@@ -1,11 +1,23 @@
-import type { HostProcesses, JsonValue } from "@ora-space/plugin-sdk";
+import {
+  AGENT_UNUSABLE,
+  type HostProcesses,
+  type JsonValue,
+  PluginMethodError,
+} from "@ora-space/plugin-sdk";
 import { spawnClaude } from "./command.ts";
 import { logger } from "./log.ts";
+import type { ModelRoute } from "./model-route.ts";
 import { decodeLines, encodeLine } from "./ndjson.ts";
 
 const log = logger("claude-client");
 /** The adapter's own stderr, republished line by line under its own target. */
 const adapterLog = logger("claude-agent-acp");
+
+/** How long the adapter may take to accept a platform route before `agent/start` fails. */
+const ROUTE_TIMEOUT_MS = 10_000;
+
+/** Prefix of the request ids this bridge sends on its own; Ora's ids are numbers or its own text. */
+const ROUTE_REQUEST_PREFIX = "ora-claude-model-route-";
 
 /** The subset of a spawned child process this bridge depends on, so tests can substitute one. */
 export interface SpawnedProcess {
@@ -24,7 +36,7 @@ export interface ClaudeClientOptions {
    * Which program a spawn resolves to is `command.ts`'s decision and is deliberately not a
    * parameter here: this class owns the adapter's lifetime, not the question of where it lives.
    */
-  spawn?: (cwd: string) => SpawnedProcess;
+  spawn?: (cwd: string, env: Record<string, string>) => SpawnedProcess;
   /** Receives every ACP frame emitted by the adapter, in output order. */
   onAcpFrame?: (frame: JsonValue) => void;
   /** Invoked after the adapter exits on its own, never after an explicit stop. */
@@ -47,16 +59,25 @@ interface RunningProcess {
  * binary envelope and the adapter's NDJSON and otherwise passed through verbatim.
  */
 export class ClaudeClient {
-  readonly #spawn: (cwd: string) => SpawnedProcess | Promise<SpawnedProcess>;
+  readonly #spawn: (
+    cwd: string,
+    env: Record<string, string>,
+  ) => SpawnedProcess | Promise<SpawnedProcess>;
   readonly #onAcpFrame: (frame: JsonValue) => void;
   readonly #onExited: () => void;
   /** Supplied by `attachProcesses` once the plugin's `Plugin` instance exists; see `main.ts`. */
   #processes: HostProcesses | undefined;
   #running: RunningProcess | undefined;
   #expectedExit = false;
+  /** The platform route every generation of the adapter starts with; absent on a local host. */
+  #route: ModelRoute | undefined;
+  /** This bridge's own outstanding requests, answered from stdout and never forwarded to Ora. */
+  readonly #pending = new Map<string, (frame: JsonValue) => void>();
+  #nextRequest = 0;
 
   constructor(options: ClaudeClientOptions = {}) {
-    this.#spawn = options.spawn ?? ((cwd) => this.#spawnViaHost(cwd));
+    this.#spawn = options.spawn ??
+      ((cwd, env) => this.#spawnViaHost(cwd, env));
     this.#onAcpFrame = options.onAcpFrame ?? (() => {});
     this.#onExited = options.onExited ?? (() => {});
   }
@@ -77,10 +98,22 @@ export class ClaudeClient {
   }
 
   /**
+   * Fixes the platform route for every later start, including an Effect restart.
+   *
+   * One plugin process serves one execution, so the route is set once per `agent/start` and never
+   * switched between users while sessions run; `undefined` returns to the adapter's own routing.
+   */
+  useRoute(route: ModelRoute | undefined): void {
+    this.#route = route;
+  }
+
+  /**
    * Spawns the ACP adapter in the given working directory and starts bridging its stdio.
    *
    * Any previous child is stopped first so a restart cannot leave two adapters writing frames into
-   * the same host connection.
+   * the same host connection. With a platform route, the adapter only counts as started once it
+   * accepted that route: a session created before `providers/set` would run on whatever routing
+   * Claude Code found by itself.
    */
   async start(cwd: string): Promise<void> {
     const restarting = this.#running !== undefined;
@@ -94,14 +127,72 @@ export class ClaudeClient {
     // have stays retryable, while a pin naming a missing executable says so by name.
     let process: SpawnedProcess;
     try {
-      process = await this.#spawn(cwd);
+      process = await this.#spawn(cwd, { ...this.#route?.environment });
     } catch (error) {
       log.warn("the adapter could not be spawned", { context: { cwd }, error });
       throw error;
     }
     this.#running = { process, stdinWriter: process.stdin.getWriter() };
     this.#attach(process);
-    log.info("adapter running", { context: { cwd, pid: process.pid } });
+    const route = this.#route;
+    if (route !== undefined) {
+      try {
+        await this.#applyRoute(route);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
+    }
+    log.info("adapter running", {
+      context: { cwd, pid: process.pid, platformRoute: route !== undefined },
+    });
+  }
+
+  /**
+   * Hands the adapter its platform route through `providers/set` and waits for it to be accepted.
+   *
+   * The request goes straight into the adapter's stdin with an id of this bridge's own, and its
+   * answer is consumed by `#pumpStdout` before anything is forwarded, so Ora never sees either
+   * frame. Neither the params nor an error payload is logged: the header carries the token.
+   */
+  async #applyRoute(route: ModelRoute): Promise<void> {
+    const id = `${ROUTE_REQUEST_PREFIX}${++this.#nextRequest}`;
+    const answered = new Promise<JsonValue>((resolve) => {
+      this.#pending.set(id, resolve);
+    });
+    let timer: number | undefined;
+    const timedOut = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ROUTE_TIMEOUT_MS);
+    });
+    try {
+      await this.writeAcp({
+        jsonrpc: "2.0",
+        id,
+        method: "providers/set",
+        params: {
+          providerId: route.provider.providerId,
+          apiType: route.provider.apiType,
+          baseUrl: route.provider.baseUrl,
+          headers: { ...route.provider.headers },
+        },
+      });
+      const answer = await Promise.race([answered, timedOut]);
+      const accepted = answer !== undefined && typeof answer === "object" &&
+        answer !== null && !Array.isArray(answer) && "result" in answer &&
+        !("error" in answer);
+      if (!accepted) {
+        log.warn("the adapter did not accept the platform model route", {
+          context: { timedOut: answer === undefined },
+        });
+        throw new PluginMethodError(
+          AGENT_UNUSABLE,
+          "the Claude ACP adapter did not accept the platform model route",
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+      this.#pending.delete(id);
+    }
   }
 
   /**
@@ -206,6 +297,13 @@ export class ClaudeClient {
           });
           continue;
         }
+        const own = typeof frame.id === "string"
+          ? this.#pending.get(frame.id)
+          : undefined;
+        if (own !== undefined && !("method" in frame)) {
+          own(frame);
+          continue;
+        }
         log.debug("adapter ACP frame received", {
           context: { pid: process.pid, ...summarize(frame) },
         });
@@ -248,13 +346,16 @@ export class ClaudeClient {
    * Asks the host to spawn and own the adapter process, adapting its `HostChildProcess` handle
    * onto `SpawnedProcess` so every other method above stays unaware of who owns the OS process.
    */
-  async #spawnViaHost(cwd: string): Promise<SpawnedProcess> {
+  async #spawnViaHost(
+    cwd: string,
+    env: Record<string, string>,
+  ): Promise<SpawnedProcess> {
     if (this.#processes === undefined) {
       throw new Error(
         "ClaudeClient cannot spawn before attachProcesses() runs",
       );
     }
-    const child = await spawnClaude(this.#processes, { cwd });
+    const child = await spawnClaude(this.#processes, { cwd, env });
     return {
       stdin: new WritableStream<Uint8Array>({
         write: (chunk) => child.write(chunk),

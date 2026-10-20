@@ -349,6 +349,39 @@ must never clear the new process's tracking or fire `onExited`. The shared
 `#expectedExit` flag reflects the newer generation's intent by then, which is
 why the identity check comes first.
 
+## Platform model route
+
+On an Ora Node, `agent/start` can carry a frozen `modelContext`: one
+`anthropic-messages` model, the platform proxy URL and a temporary token. The
+plugin, not the host, turns that into Claude Code's routing
+(`src/services/model-route.ts`), and the SDK refuses the start unless `onStart`
+returns the exact `AgentModelApplied` — so ACP never begins on an unapplied
+route.
+
+The route is applied through the adapter's own `providers/set`, sent by the
+bridge right after spawn and **before** `agent/start` returns:
+
+- `claude-agent-acp` puts a provider route into Claude Code's programmatic
+  settings tier with `apiKeyHelper` cleared. That is the only reason a
+  repository's `.claude/settings.json` (or a user setting) cannot restore a
+  different `ANTHROPIC_BASE_URL` and send the token there. Setting
+  `ANTHROPIC_BASE_URL` in the spawn environment would not have that property.
+- The token travels only as the `x-api-key` header of that request, which the
+  platform gateway reads first on its Messages route; it is never placed in the
+  adapter's environment or logged.
+- The model aliases Claude Code resolves by itself (main, small/fast, subagent,
+  `opus`/`sonnet`/`haiku`) are pinned to the frozen model in the spawn
+  environment. A setting that overrides one fails closed at the gateway, which
+  serves only the frozen model id.
+- `ClaudeClient.useRoute` keeps the route for every later start, so an Effect
+  `reactivate` restart reapplies it before the adapter counts as running.
+
+This is the second narrow exception to "ACP payloads are never parsed": the
+bridge writes one request of its own (`id` prefixed `ora-claude-model-route-`)
+and consumes its answer by id before forwarding anything, so Ora never sees
+either frame. A different `claude-agent-acp` pin must be checked for the same
+`providers/set` behaviour before it ships with a declaration.
+
 ## Model discovery
 
 `claude-agent-acp` is a pure ACP server: it takes no subcommand, and its
@@ -386,9 +419,9 @@ a start/stop cycle around a picker opening makes the next open pay full price.
   Ora's binary envelope and the adapter's NDJSON and otherwise passed through
   verbatim — this is also what lets Claude Code's ACP extensions (session modes,
   steering, its `_meta` capabilities) reach Ora without this plugin knowing they
-  exist. `handlers/effects.ts` is the one exception, and a deliberately narrow
-  one: it reads `method` and `id` off the envelope to track turns, and never
-  looks at `params`.
+  exist. `handlers/effects.ts` is one exception, and a deliberately narrow one:
+  it reads `method` and `id` off the envelope to track turns, and never looks at
+  `params`; the platform model route above is the other.
 - **Throw the right error code.** `AGENT_NOT_INSTALLED` (`-32001`) is retried
   quietly by Ora as expected local configuration; `AGENT_UNUSABLE` (`-32002`) is
   reported once and not retried; `-32000` is how an Effect Consumer says "not

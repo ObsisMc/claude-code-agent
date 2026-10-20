@@ -1,6 +1,7 @@
 import type {
   AcpSender,
   AgentModel,
+  AgentModelApplied,
   AgentStartContext,
   HostProcesses,
   JsonValue,
@@ -95,7 +96,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
   override onStart = async (
     context: AgentStartContext,
     send: AcpSender,
-  ): Promise<void> => {
+  ): Promise<AgentModelApplied | void> => {
     this.#log.info("agent start requested", {
       context: { cwd: context.cwd, previousCwd: this.#cwd },
     });
@@ -105,7 +106,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
     this.#send = send;
     this.#cwd = context.cwd;
     invalidateClaudeModels(context.cwd);
-    await startClaude(this.#client, context);
+    return await startClaude(this.#client, context);
   };
 
   override onStop = async (): Promise<void> => {
