@@ -4,7 +4,7 @@
   "exports": "./src/main.ts",
   "minimumDependencyAge": 0,
   "imports": {
-    "@ora-space/plugin-sdk": "jsr:@ora-space/plugin-sdk@0.10.0",
+    "@ora-space/plugin-sdk": "jsr:@ora-space/plugin-sdk@0.11.0",
     "@std/assert": "jsr:@std/assert@^1.0.0",
     "@std/cli": "jsr:@std/cli@^1.0.32",
     "@std/crypto": "jsr:@std/crypto@^1.0.5",
@@ -14,10 +14,10 @@
     "@zip-js/zip-js": "jsr:@zip-js/zip-js@^2.8.61"
   },
   "tasks": {
-    "check": "deno check src/main.ts tests/main_test.ts tests/host-simulator.ts scripts/package.ts scripts/sync-upstream.ts",
+    "check": "deno check src/main.ts tests/main_test.ts tests/model_route_test.ts tests/host-simulator.ts scripts/package.ts scripts/sync-upstream.ts",
     "lint": "deno lint src scripts tests bundle.config.ts",
     "format": "deno fmt src scripts tests bundle.config.ts deno.json package.json README.md AGENTS.md",
-    "test": "deno test --allow-read --allow-env --allow-write tests/main_test.ts",
+    "test": "deno test --allow-read --allow-env --allow-write tests/main_test.ts tests/model_route_test.ts",
     "simulate": "deno run --allow-run --allow-read --allow-env --allow-net tests/host-simulator.ts",
     "dev": "deno run --no-prompt --allow-run --allow-read --allow-env --allow-net src/main.ts",
     "build": "deno bundle src/main.ts -o dist/main.js",

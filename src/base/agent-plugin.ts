@@ -3,6 +3,7 @@ import {
   AGENT_METHODS,
   type AgentEffectDefinition,
   type AgentModel,
+  type AgentModelApplied,
   type AgentStartContext,
   createHostProcesses,
   defineAgent,
@@ -88,12 +89,14 @@ export abstract class AgentPlugin {
    *
    * `send` stays valid for the rest of the process and is how every agent-originated ACP frame
    * reaches the host. Throw `PluginMethodError(AGENT_NOT_INSTALLED, ...)` when the underlying CLI
-   * is missing, which the host treats as expected local configuration instead of a fault.
+   * is missing, which the host treats as expected local configuration instead of a fault. A start
+   * carrying `modelContext` must return the exact `AgentModelApplied` once that configuration is in
+   * effect; the SDK fails the start otherwise, so ACP never begins on an unapplied route.
    */
   abstract onStart(
     context: AgentStartContext,
     send: AcpSender,
-  ): void | Promise<void>;
+  ): void | AgentModelApplied | Promise<void | AgentModelApplied>;
 
   /** [agent/acp] Receives one ACP frame the host is forwarding to the agent. */
   abstract onAcp(frame: JsonValue): void | Promise<void>;
@@ -145,7 +148,8 @@ export async function runAgentPlugin(
         () =>
           invoke(routes, AGENT_METHOD_ROUTES.onStart, startContext, send) as
             | void
-            | Promise<void>,
+            | AgentModelApplied
+            | Promise<void | AgentModelApplied>,
       ),
     stop: () =>
       traced(
