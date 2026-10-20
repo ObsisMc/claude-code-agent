@@ -235,6 +235,39 @@ with a run summary naming what is missing, rather than reaching
 the same distinction the plugin itself draws between expected configuration and
 a real failure. **A run that says "Not published" is that check, not a bug.**
 
+### The Agent declaration, and when a release ships it
+
+`assets/config.json` is the Agent declaration of what this plugin asks the host
+to configure — for now, one personal model connection over `anthropic-messages`.
+It only ships when packaging runs with
+`deno task package --agent-configuration`: with the flag, every `.orax` carries
+it and the script **reads it back from the finished archive**, because every
+target of one release must carry byte-identical declaration bytes — the release
+binds exactly one declaration digest, and a reformat is a different declaration
+identity however semantically identical it looks. `tests/main_test.ts` pins that
+digest, so reformatting the file is a conscious, release-affecting change — not
+something formatting can do silently.
+
+**The flag exists because publish order is constrained by host support, and it
+gates the bytes themselves.** An `agent`-kind package whose declaration a
+current Ora host cannot compile installs fine but then refuses to activate:
+shipping the declaration before the hosts that resolve it are deployed would
+publish a plugin that installs and then does not start. Without the flag,
+packages carry no declaration at all and current hosts install the release
+exactly as before. With it, the static copy (`dist/agent-configuration.json`,
+attached to the release and copied into the registry entry beside `orax.toml`)
+and the `[agent_configuration]` section in `manifest.toml` are written alongside
+the bytes. `release.yml` passes the flag only once the hosts resolving the
+declaration are deployed; that is an owner decision made by editing one line,
+not something this repository can detect.
+
+The packaging script deliberately does not interpret the declaration's shape: it
+checks readable UTF-8, the 256 KiB size bound every host enforces, and reads
+`schemaVersion` — the one number the section needs — from the bytes themselves.
+Whether the declaration is _legal_ is proven by the host compilers at
+marketplace sync and at install, from the same shared cross-language samples;
+re-implementing that judgment here would only ever drift from it.
+
 ### One packaging trap worth knowing
 
 zip.js reads a custom `Reader` by pulling fixed-size chunks with **no idea of

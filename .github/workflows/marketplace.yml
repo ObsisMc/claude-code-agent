@@ -129,6 +129,15 @@ jobs:
             echo "::error::${TAG} ships a manifest for ${MANIFEST_VERSION}"
             exit 1
           fi
+          # The static declaration copy is attached only by releases that bound one; `gh release
+          # download` fails when no asset matches, so absence is expected, not an error.
+          if grep -q '^\[agent_configuration\]' dist/manifest.toml; then
+            gh release download "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern agent-configuration.json \
+              --dir dist \
+              --clobber
+          fi
 
       # `GITHUB_TOKEN` is scoped to this repository and cannot write to the marketplace, so the
       # cross-repository push borrows a short-lived installation token instead of a long-lived PAT.
@@ -190,6 +199,13 @@ jobs:
           mkdir -p "$DIR"
           cp ../dist/manifest.toml "${DIR}/orax.toml"
           cp ../README.md "${DIR}/README.md"
+          # The declaration copy the manifest's `[agent_configuration]` names, when this release
+          # bound one; the sync reads it relative to this entry directory.
+          if [ -f ../dist/agent-configuration.json ]; then
+            cp ../dist/agent-configuration.json "${DIR}/agent-configuration.json"
+          else
+            rm -f "${DIR}/agent-configuration.json"
+          fi
 
           # The bare logo, plus any themed variant (`logo.dark.svg`) and raster format the plugin
           # carries. Cleared first so a variant the plugin has since dropped does not linger.
