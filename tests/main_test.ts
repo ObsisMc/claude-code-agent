@@ -21,7 +21,11 @@ import {
   bundledAdapterPath,
   bundledClaudePath,
 } from "../src/services/bundled-binary.ts";
-import { declarationAssociation, packagedDeclaration, releaseManifest } from "../scripts/package.ts";
+import {
+  declarationAssociation,
+  packagedDeclaration,
+  releaseManifest,
+} from "../scripts/package.ts";
 import { BlobReader, ZipWriter } from "@zip-js/zip-js";
 import {
   ClaudeClient,
