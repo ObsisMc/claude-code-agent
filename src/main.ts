@@ -120,6 +120,14 @@ class ClaudeAgentPlugin extends AgentPlugin {
   override onListModels = (
     context: AgentListModelsContext,
   ): Promise<AgentModel[]> => {
+    // A platform route offers exactly its frozen model. Probing would start an adapter on the
+    // host's own credentials and routing — a run nobody admitted — and list what that finds.
+    const frozen = this.#client.frozenModel;
+    if (frozen !== undefined) {
+      return Promise.resolve([
+        { id: frozen.id, displayName: frozen.name, default: true },
+      ]);
+    }
     if (this.#processes === undefined) {
       throw new Error(
         `${AGENT_METHODS.listModels} was called before activation`,

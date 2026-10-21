@@ -402,6 +402,12 @@ the adapter and answers these itself, so the adapter never sees them:
   spreads them over its own environment, where they would outrank the pinned
   aliases.
 
+The adapter's own model selector is narrowed the same way: every `configOptions`
+model entry (and a `models` state, should a pin send one) in a result or a
+`config_option_update` offers only the frozen model, and `agent/list_models`
+answers that model without starting a discovery probe, which would run on the
+host's own credentials and routing.
+
 ## Model discovery
 
 `claude-agent-acp` is a pure ACP server: it takes no subcommand, and its

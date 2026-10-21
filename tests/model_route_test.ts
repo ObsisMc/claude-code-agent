@@ -400,6 +400,103 @@ Deno.test("the compiled adapter honours no CLI pin or local install on a platfor
   assertEquals(bundledOnly < resolver.indexOf("findLocalClaude()"), true);
 });
 
+Deno.test("every model selector the adapter reports offers only the frozen model", async () => {
+  const { adapter, client, forwarded } = await platformClient();
+  assertEquals(client.frozenModel, { id: "team/claude", name: "Team Claude" });
+  const mode = { id: "mode", category: "mode", currentValue: "default" };
+  const picker = {
+    id: "model",
+    name: "Model",
+    category: "model",
+    type: "select",
+    currentValue: "default",
+    options: [
+      { value: "default", name: "Default" },
+      { value: "opus", name: "Opus" },
+      { value: "sonnet", name: "Sonnet" },
+    ],
+  };
+  const frozen = {
+    ...picker,
+    currentValue: "team/claude",
+    options: [{ value: "team/claude", name: "Team Claude" }],
+  };
+  adapter.emit({
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      sessionId: "s1",
+      configOptions: [mode, picker],
+      models: {
+        currentModelId: "default",
+        availableModels: [{ modelId: "opus", name: "Opus" }],
+      },
+    },
+  });
+  adapter.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId: "s2",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [picker],
+      },
+    },
+  });
+  await waitFor(() => forwarded.length === 2);
+  assertEquals(forwarded[0], {
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      sessionId: "s1",
+      configOptions: [mode, frozen],
+      models: {
+        currentModelId: "team/claude",
+        availableModels: [{ modelId: "team/claude", name: "Team Claude" }],
+      },
+    },
+  });
+  assertEquals(forwarded[1], {
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId: "s2",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [frozen],
+      },
+    },
+  });
+  // The no-op answer repeats the narrowed set, never the adapter's own list.
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "session/set_config_option",
+    params: { sessionId: "s2", configId: "model", value: "team/claude" },
+  });
+  assertEquals(forwarded[2], {
+    jsonrpc: "2.0",
+    id: 2,
+    result: { configOptions: [frozen] },
+  });
+  await client.stop();
+});
+
+Deno.test("model discovery on a platform route answers the frozen model without a probe", async () => {
+  // Read as text: importing the entrypoint would start serving the host.
+  const main = await Deno.readTextFile(
+    new URL("../src/main.ts", import.meta.url),
+  );
+  const handler = main.slice(main.indexOf("override onListModels"));
+  assertEquals(
+    handler.indexOf("this.#client.frozenModel") <
+      handler.indexOf("listClaudeModels("),
+    true,
+  );
+  assertEquals(new ClaudeClient().frozenModel, undefined);
+});
+
 /** A client started on the platform route, with the route request already answered. */
 async function platformClient() {
   const adapter = new ScriptedAdapter("accept");

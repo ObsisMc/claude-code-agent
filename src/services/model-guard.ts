@@ -66,8 +66,9 @@ const SESSION_SETUP = new Set([
  *
  * The route itself is applied once, through `providers/set`; this class only keeps anyone else
  * from undoing it over ACP. It refuses the methods that could move the adapter to another
- * upstream or model, strips session options that would do the same, and remembers each session's
- * config options so re-selecting the frozen model can be answered without reaching the adapter.
+ * upstream or model, strips session options that would do the same, narrows every model selector
+ * the adapter reports to the frozen model, and remembers each session's config options so
+ * re-selecting the frozen model can be answered without reaching the adapter.
  */
 export class ModelGuard {
   readonly #model: FrozenModel;
@@ -78,6 +79,11 @@ export class ModelGuard {
 
   constructor(model: FrozenModel) {
     this.#model = model;
+  }
+
+  /** The model `agent/list_models` reports: the frozen one, never anything discovered. */
+  get model(): FrozenModel {
+    return this.#model;
   }
 
   /** Decides what happens to one frame Ora sent towards the adapter. */
@@ -121,36 +127,70 @@ export class ModelGuard {
     return { forward: frame };
   }
 
-  /** Observes, and may rewrite, one frame the adapter sent before Ora sees it. */
+  /** Rewrites one frame the adapter sent before Ora sees it. */
   outbound(frame: JsonValue): JsonValue {
     if (!isObject(frame)) return frame;
-    if (typeof frame.method === "string") {
-      this.#observeUpdate(frame);
-      return frame;
-    }
+    if (typeof frame.method === "string") return this.#narrowUpdate(frame);
     const sessionId = hasId(frame)
       ? this.#takePendingSession(frame.id)
       : undefined;
     if (!isObject(frame.result)) return frame;
-    const owner = typeof frame.result.sessionId === "string"
-      ? frame.result.sessionId
+    const result = this.#narrowModels(frame.result);
+    const owner = typeof result.sessionId === "string"
+      ? result.sessionId
       : sessionId;
-    if (owner !== undefined && Array.isArray(frame.result.configOptions)) {
-      this.#configOptions.set(owner, frame.result.configOptions);
+    if (owner !== undefined && Array.isArray(result.configOptions)) {
+      this.#configOptions.set(owner, result.configOptions);
     }
-    return frame;
+    return { ...frame, result };
   }
 
-  /** A `config_option_update` replaces the whole set a session reports. */
-  #observeUpdate(frame: { [key: string]: JsonValue }): void {
-    if (frame.method !== "session/update" || !isObject(frame.params)) return;
-    const update = frame.params.update;
-    if (
-      isObject(update) && Array.isArray(update.configOptions) &&
-      typeof frame.params.sessionId === "string"
-    ) {
-      this.#configOptions.set(frame.params.sessionId, update.configOptions);
+  /** Narrows the selector a `config_option_update` carries; it replaces a session's whole set. */
+  #narrowUpdate(frame: { [key: string]: JsonValue }): JsonValue {
+    if (frame.method !== "session/update" || !isObject(frame.params)) {
+      return frame;
     }
+    const update = frame.params.update;
+    if (!isObject(update) || !Array.isArray(update.configOptions)) return frame;
+    const narrowed = this.#narrowModels(update);
+    if (typeof frame.params.sessionId === "string") {
+      this.#configOptions.set(
+        frame.params.sessionId,
+        narrowed.configOptions as JsonValue[],
+      );
+    }
+    return { ...frame, params: { ...frame.params, update: narrowed } };
+  }
+
+  /**
+   * Replaces every model selector in one payload with one that offers only the frozen model.
+   *
+   * The adapter builds its list from Claude Code's aliases narrowed by what the gateway lists, so
+   * it can offer `default`, `sonnet` or a gateway id beside the frozen one. Every alias resolves
+   * to the frozen model through the pinned environment, but listing them would still offer a
+   * choice this execution does not have (ADR D5: visible session options never widen the set).
+   */
+  #narrowModels(
+    payload: { [key: string]: JsonValue },
+  ): { [key: string]: JsonValue } {
+    const narrowed = { ...payload };
+    const only = { value: this.#model.id, name: this.#model.name };
+    if (Array.isArray(payload.configOptions)) {
+      narrowed.configOptions = payload.configOptions.map((option) =>
+        isObject(option) &&
+          (option.id === "model" || option.category === "model")
+          ? { ...option, currentValue: only.value, options: [only] }
+          : option
+      );
+    }
+    if (isObject(payload.models)) {
+      narrowed.models = {
+        ...payload.models,
+        currentModelId: this.#model.id,
+        availableModels: [{ modelId: this.#model.id, name: this.#model.name }],
+      };
+    }
+    return narrowed;
   }
 
   #takePendingSession(id: string | number): string | undefined {

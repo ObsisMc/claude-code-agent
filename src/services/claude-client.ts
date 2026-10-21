@@ -6,7 +6,7 @@ import {
 } from "@ora-space/plugin-sdk";
 import { spawnBundledClaude, spawnClaude } from "./command.ts";
 import { logger } from "./log.ts";
-import { ModelGuard } from "./model-guard.ts";
+import { type FrozenModel, ModelGuard } from "./model-guard.ts";
 import type { ModelRoute } from "./model-route.ts";
 import { decodeLines, encodeLine } from "./ndjson.ts";
 
@@ -85,6 +85,11 @@ export class ClaudeClient {
       ((cwd, env) => this.#spawnViaHost(cwd, env));
     this.#onAcpFrame = options.onAcpFrame ?? (() => {});
     this.#onExited = options.onExited ?? (() => {});
+  }
+
+  /** The only model a platform route may use; `undefined` keeps the adapter's own discovery. */
+  get frozenModel(): FrozenModel | undefined {
+    return this.#guard?.model;
   }
 
   get running(): boolean {
