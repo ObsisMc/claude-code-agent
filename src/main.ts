@@ -6,7 +6,6 @@ import type {
   HostProcesses,
   JsonValue,
 } from "@ora-space/plugin-sdk";
-import { AGENT_METHODS } from "@ora-space/plugin-sdk";
 import {
   type AgentListModelsContext,
   AgentPlugin,
@@ -19,7 +18,7 @@ import { startClaude, stopClaude } from "./handlers/lifecycle.ts";
 import {
   invalidateAllClaudeModels,
   invalidateClaudeModels,
-  listClaudeModels,
+  listAgentModels,
 } from "./handlers/models.ts";
 import { ClaudeClient } from "./services/claude-client.ts";
 import { logger } from "./services/log.ts";
@@ -117,24 +116,8 @@ class ClaudeAgentPlugin extends AgentPlugin {
 
   override onListModels = (
     context: AgentListModelsContext,
-  ): Promise<AgentModel[]> => {
-    // A platform route offers exactly its frozen model. Probing would start an adapter on the
-    // host's own credentials and routing — a run nobody admitted — and list what that finds.
-    const frozen = this.#client.frozenModel;
-    if (frozen !== undefined) {
-      return Promise.resolve([
-        { id: frozen.id, displayName: frozen.name, default: true },
-      ]);
-    }
-    if (this.#processes === undefined) {
-      throw new Error(
-        `${AGENT_METHODS.listModels} was called before activation`,
-      );
-    }
-    // Discovery is answered for the Workspace the host named, not for `#cwd`: `agent/start` gets a
-    // neutral directory, and a user can open pickers for a project this connection never ran in.
-    return listClaudeModels(this.#processes, context.cwd);
-  };
+  ): Promise<AgentModel[]> =>
+    listAgentModels(this.#client, this.#processes, context.cwd);
 
   override onAcp = (frame: JsonValue): Promise<void> | void =>
     forwardAcpFrame(this.#client, this.#effects, frame);

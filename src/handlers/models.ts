@@ -3,8 +3,13 @@ import type {
   HostProcesses,
   JsonValue,
 } from "@ora-space/plugin-sdk";
-import { INVALID_PARAMS, PluginMethodError } from "@ora-space/plugin-sdk";
+import {
+  AGENT_METHODS,
+  INVALID_PARAMS,
+  PluginMethodError,
+} from "@ora-space/plugin-sdk";
 import { AcpProbe } from "../services/acp-probe.ts";
+import type { ClaudeClient } from "../services/claude-client.ts";
 import { spawnClaude } from "../services/command.ts";
 import { logger } from "../services/log.ts";
 
@@ -39,6 +44,32 @@ export function invalidateClaudeModels(cwd: string): void {
 /** Drops every workspace catalog when this plugin generation is going away. */
 export function invalidateAllClaudeModels(): void {
   catalogs.clear();
+}
+
+/**
+ * Serves `agent/list_models`: the frozen model on a platform route, discovery everywhere else.
+ *
+ * A platform route offers exactly its frozen model. Probing would start an adapter on the host's
+ * own credentials and routing — a run nobody admitted — and list what that finds (ADR D5).
+ * Discovery is answered for the Workspace the host named, not for the directory `agent/start` was
+ * given: that one is neutral, and a user can open pickers for a project this connection never ran
+ * in.
+ */
+export function listAgentModels(
+  client: Pick<ClaudeClient, "frozenModel">,
+  processes: HostProcesses | undefined,
+  cwd: string,
+): Promise<AgentModel[]> {
+  const frozen = client.frozenModel;
+  if (frozen !== undefined) {
+    return Promise.resolve([
+      { id: frozen.id, displayName: frozen.name, default: true },
+    ]);
+  }
+  if (processes === undefined) {
+    throw new Error(`${AGENT_METHODS.listModels} was called before activation`);
+  }
+  return listClaudeModels(processes, cwd);
 }
 
 /**

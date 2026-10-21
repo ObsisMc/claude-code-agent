@@ -252,14 +252,14 @@ Deno.test("the bundled adapter is asked for before anything on PATH", async () =
   assertEquals(Object.hasOwn(spawns[0], "command"), false);
 });
 
-Deno.test("the compiled adapter pins its CLI with this package's own variable", async () => {
+Deno.test("the compiled adapter never honours an inherited CLAUDE_CODE_EXECUTABLE", async () => {
   const entry = await Deno.readTextFile(
     new URL("../scripts/adapter-entry.mjs", import.meta.url),
   );
-  assertEquals(entry.includes('"ORA_CLAUDE_BIN"'), true);
-  // Read as text because this file is compiled by Bun into a separate process and never imported
-  // here. `CLAUDE_CODE_EXECUTABLE` may only ever be written, never read: honouring an inherited
-  // one would run a different CLI than the package ships, and nothing would say so.
+  // Read as text because importing this file starts the adapter; which CLI it resolves is tested
+  // through `resolve-claude-cli.mjs` itself. `CLAUDE_CODE_EXECUTABLE` may only ever be written,
+  // never read: honouring an inherited one would run a different CLI than the package ships, and
+  // nothing would say so.
   assertEquals(
     entry.includes("process.env.CLAUDE_CODE_EXECUTABLE ="),
     true,

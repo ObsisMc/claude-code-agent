@@ -224,6 +224,11 @@ async function compileAdapter(plan: TargetPlan, staged: string): Promise<void> {
     join("scripts", "adapter-entry.mjs"),
     join(ADAPTER_DIR, "entry.mjs"),
   );
+  // The entry point imports the CLI resolver by this relative name.
+  await Deno.copyFile(
+    join("scripts", "resolve-claude-cli.mjs"),
+    join(ADAPTER_DIR, "resolve-claude-cli.mjs"),
+  );
   await Deno.mkdir(dirname(staged), { recursive: true });
   await run(
     "bun",

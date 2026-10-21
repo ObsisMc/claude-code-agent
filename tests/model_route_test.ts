@@ -1,15 +1,18 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { dirname, join } from "@std/path";
 import {
   AGENT_UNUSABLE,
   type AgentModelContext,
   createLogger,
   createStderrLogSink,
   type HostChildProcessOptions,
+  type HostProcesses,
   HostRequestError,
   INVALID_PARAMS,
   type JsonValue,
 } from "@ora-space/plugin-sdk";
 import { startClaude } from "../src/handlers/lifecycle.ts";
+import { listAgentModels } from "../src/handlers/models.ts";
 import {
   ClaudeClient,
   type SpawnedProcess,
@@ -20,6 +23,28 @@ import { installLogger } from "../src/services/log.ts";
 import { modelRoute } from "../src/services/model-route.ts";
 
 const TOKEN = "synthetic-temporary-token";
+
+/**
+ * The CLI resolver compiled into the adapter binary. It is plain Node ESM, loaded through a
+ * computed specifier so `deno check` does not follow it into `node:` typings this repository does
+ * not install; the test still runs the module itself.
+ */
+const {
+  BIN_ENV_VAR: CLI_BIN_ENV_VAR,
+  BUNDLED_ONLY_ENV_VAR,
+  resolveClaudeCli,
+} = await import(
+  String(new URL("../scripts/resolve-claude-cli.mjs", import.meta.url))
+) as {
+  BIN_ENV_VAR: string;
+  BUNDLED_ONLY_ENV_VAR: string;
+  resolveClaudeCli: (options: {
+    env: Record<string, string>;
+    execPath: string;
+    claudeBinaryName: string;
+    warn: (message: string) => void;
+  }) => { path: string; source: string };
+};
 
 /** The frozen context a Node hands this plugin for one platform-model execution. */
 function context(
@@ -410,23 +435,35 @@ Deno.test("a platform route spawns only the bundled adapter, ignoring a pin and 
   assertEquals(spawns[0].env?.ORA_CLAUDE_BUNDLED_CLI_ONLY, "1");
 });
 
-Deno.test("the compiled adapter honours no CLI pin or local install on a platform route", async () => {
-  // Read as text: this file is compiled by Bun into the adapter binary and never imported here.
-  const entry = await Deno.readTextFile(
-    new URL("../scripts/adapter-entry.mjs", import.meta.url),
-  );
-  const resolver = entry.slice(entry.indexOf("function resolveClaudeCli()"));
-  const bundledOnly = resolver.indexOf(
-    'process.env[BUNDLED_ONLY_ENV_VAR] === "1"',
-  );
-  assertEquals(entry.includes('"ORA_CLAUDE_BUNDLED_CLI_ONLY"'), true);
-  assertEquals(bundledOnly > 0, true);
-  // The bundled-only branch returns before the pin or the local search is ever read.
-  assertEquals(
-    bundledOnly < resolver.indexOf("process.env[BIN_ENV_VAR]"),
-    true,
-  );
-  assertEquals(bundledOnly < resolver.indexOf("findLocalClaude()"), true);
+Deno.test("the compiled adapter runs only its bundled CLI on a platform route", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const { execPath, bundled, pinned, localDir } = await cliLayout(root);
+    const resolve = (env: Record<string, string>) =>
+      resolveClaudeCli({
+        env,
+        execPath,
+        claudeBinaryName: "claude",
+        warn: () => {},
+      });
+    const everything = { [CLI_BIN_ENV_VAR]: pinned, PATH: localDir };
+    // Locally the pin outranks the bundled copy.
+    assertEquals(resolve(everything), { path: pinned, source: "pinned" });
+    // On a route neither the pin nor a local install is ever read.
+    assertEquals(
+      resolve({ ...everything, [BUNDLED_ONLY_ENV_VAR]: "1" }),
+      { path: bundled, source: "bundled" },
+    );
+    await Deno.remove(bundled);
+    assertEquals(resolve(everything).source, "pinned");
+    assertThrows(
+      () => resolve({ ...everything, [BUNDLED_ONLY_ENV_VAR]: "1" }),
+      Error,
+      BUNDLED_ONLY_ENV_VAR,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });
 
 Deno.test("every model selector the adapter reports offers only the frozen model", async () => {
@@ -513,17 +550,25 @@ Deno.test("every model selector the adapter reports offers only the frozen model
 });
 
 Deno.test("model discovery on a platform route answers the frozen model without a probe", async () => {
-  // Read as text: importing the entrypoint would start serving the host.
-  const main = await Deno.readTextFile(
-    new URL("../src/main.ts", import.meta.url),
+  const { client } = await platformClient();
+  const spawns: HostChildProcessOptions[] = [];
+  const processes: HostProcesses = {
+    spawn: (options) => {
+      spawns.push(options);
+      return Promise.reject(new Error("a probe must not start"));
+    },
+  };
+  assertEquals(await listAgentModels(client, processes, "/workspace"), [
+    { id: "team/claude", displayName: "Team Claude", default: true },
+  ]);
+  assertEquals(spawns, []);
+  await client.stop();
+  // Without a route the same call is discovery, which needs the host's processes.
+  assertThrows(
+    () => listAgentModels(new ClaudeClient(), undefined, "/workspace"),
+    Error,
+    "before activation",
   );
-  const handler = main.slice(main.indexOf("override onListModels"));
-  assertEquals(
-    handler.indexOf("this.#client.frozenModel") <
-      handler.indexOf("listClaudeModels("),
-    true,
-  );
-  assertEquals(new ClaudeClient().frozenModel, undefined);
 });
 
 Deno.test("adapter errors reach Ora with their code but without their text", async () => {
@@ -677,6 +722,21 @@ Deno.test("an adapter waiting for its route is running but not ready", async () 
   await client.stop();
   assertEquals(client.ready, false);
 });
+
+/** A bundled CLI beside a fake adapter, a pinned one, and one on a fake PATH. */
+async function cliLayout(root: string) {
+  const files = {
+    execPath: join(root, "package", "claude-agent-acp"),
+    bundled: join(root, "package", "claude"),
+    pinned: join(root, "pinned", "claude"),
+    local: join(root, "local", "claude"),
+  };
+  for (const path of Object.values(files)) {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, "");
+  }
+  return { ...files, localDir: dirname(files.local) };
+}
 
 async function platformClient() {
   const adapter = new ScriptedAdapter("accept");
