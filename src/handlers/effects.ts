@@ -212,16 +212,25 @@ export class SkillEffectCoordinator {
       method: "effect/reactivate",
       context: { targetId: context.targetId, cwd, held: this.#held.length },
     });
-    if (cwd !== undefined) {
-      invalidateClaudeModels(cwd);
-      await this.#client.start(cwd);
-    } else {
-      log.warn("effect/reactivate has no workspace to restart the adapter in", {
-        method: "effect/reactivate",
-        context: { targetId: context.targetId },
-      });
+    try {
+      if (cwd !== undefined) {
+        invalidateClaudeModels(cwd);
+        await this.#client.start(cwd);
+      } else {
+        log.warn(
+          "effect/reactivate has no workspace to restart the adapter in",
+          {
+            method: "effect/reactivate",
+            context: { targetId: context.targetId },
+          },
+        );
+      }
+    } finally {
+      // A restart that failed (a route the adapter refused or never answered) must not keep the
+      // barrier up: nothing would ever lower it, and every prompt held behind it would wait for
+      // the life of the process. `#release` drops what no adapter is running to receive.
+      await this.#release();
     }
-    await this.#release();
     log.info("Skill barrier released", {
       method: "effect/reactivate",
       context: { targetId: context.targetId },
@@ -283,6 +292,15 @@ export class SkillEffectCoordinator {
    * pass instead of being stranded behind a barrier that is about to come down.
    */
   async #release(): Promise<void> {
+    if (!this.#client.ready && this.#held !== undefined) {
+      // The same rule as a frame arriving while the adapter is down (`forwardAcpFrame`): the start
+      // that failed already told Ora this agent is gone, and nothing here can serve the turns.
+      log.warn("dropping held turns: the Claude agent is not running", {
+        context: { dropped: this.#held.length },
+      });
+      this.#held = undefined;
+      return;
+    }
     let replayed = 0;
     while (this.#held !== undefined && this.#held.length > 0) {
       const frame = this.#held.shift();
