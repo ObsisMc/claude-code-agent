@@ -125,7 +125,10 @@ The published adapter is a Node program that finds its CLI with
 `createRequire(...).resolve("@anthropic-ai/claude-agent-sdk-<platform>/claude")`
 — a `node_modules` lookup that cannot work inside a compiled single-file binary.
 `scripts/adapter-entry.mjs` answers that question before handing control to the
-adapter unchanged, by setting `CLAUDE_CODE_EXECUTABLE` from its own ladder:
+adapter unchanged, by setting `CLAUDE_CODE_EXECUTABLE` from the ladder in
+`scripts/resolve-claude-cli.mjs` (a module of its own because importing the
+entry point starts the adapter, and the ladder is what tests have to run;
+packaging copies both beside the installed dependencies):
 
 1. **`ORA_CLAUDE_BIN`** — pins one exact CLI, and fails if it points at nothing.
 2. **the bundled CLI beside it**, found through `process.execPath`, which is the
@@ -366,21 +369,42 @@ bridge right after spawn and **before** `agent/start` returns:
   repository's `.claude/settings.json` (or a user setting) cannot restore a
   different `ANTHROPIC_BASE_URL` and send the token there. Setting
   `ANTHROPIC_BASE_URL` in the spawn environment would not have that property.
-- The token travels only as the `x-api-key` header of that request, which the
-  platform gateway reads first on its Messages route; it is never placed in the
-  adapter's environment or logged.
+- The token travels as the `x-api-key` header of that request, which the
+  platform gateway reads first on its Messages route. This plugin never puts it
+  in the adapter's spawn environment or a log, but the pinned adapter does not
+  keep it in that request either: it merges the header into the Claude Code
+  process environment (`ANTHROPIC_CUSTOM_HEADERS`) **and** into the `env` of the
+  programmatic settings, and the Claude Agent SDK passes those settings to the
+  CLI as a `--settings` argument. The token is therefore readable in the CLI's
+  command line by anyone who can list that process. It is valid for one
+  execution only, but it is not confined to memory and the execution's own
+  environment, and that is a known gap until the route stops reaching the
+  settings.
 - The model aliases Claude Code resolves by itself (main, small/fast, subagent,
   `opus`/`sonnet`/`haiku`) are pinned to the frozen model in the spawn
   environment. A setting that overrides one fails closed at the gateway, which
-  serves only the frozen model id.
+  serves only the frozen model id. `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is the frozen
+  model's own `maxTokens`.
+- A context frozen for another plugin id or another target triple, a token with
+  a control character in it (a header cannot carry one, and the adapter would
+  only fail later, retryably), or a non-positive `maxTokens` is refused with
+  `INVALID_PARAMS` before anything starts.
 - `ClaudeClient.useRoute` keeps the route for every later start, so an Effect
-  `reactivate` restart reapplies it before the adapter counts as running.
+  `reactivate` restart reapplies it before the adapter counts as ready.
+  `ClaudeClient.ready`, not `running`, is what readiness and the Effect replay
+  read: a process waiting for `providers/set` is running but on no route yet.
+- A route that fails is classified by the adapter's code alone. `invalid_params`
+  or `method_not_found` means this adapter refuses the configuration and fails
+  as `AGENT_UNUSABLE`, which Ora does not retry. Anything else, or no answer
+  within ten seconds, fails with `-32603`, which Ora retries: the pinned adapter
+  lists the gateway's models inside `providers/set`, and a listing that failed
+  (a 503, a timeout) answers as an internal error that the next start can pass.
 - Only the pair this package ships runs on a route. `spawnBundledClaude` asks
   the host for the bundled adapter alone — no `ORA_CLAUDE_ACP_BIN`, no PATH —
   and fails as `AGENT_UNUSABLE` when the package cannot run it;
   `ORA_CLAUDE_BUNDLED_CLI_ONLY=1` in the route environment makes
-  `scripts/adapter-entry.mjs` refuse `ORA_CLAUDE_BIN` and a local install the
-  same way.
+  `scripts/resolve-claude-cli.mjs` refuse `ORA_CLAUDE_BIN` and a local install
+  the same way.
 
 This is the second narrow exception to "ACP payloads are never parsed": the
 bridge writes one request of its own (`id` prefixed `ora-claude-model-route-`)
@@ -392,9 +416,9 @@ Applying the route once is not enough: the same ACP connection could undo it. On
 a platform route `services/model-guard.ts` reads Ora's frames before they reach
 the adapter and answers these itself, so the adapter never sees them:
 
-- `authenticate`, `logout`, `auth/*`, `_auth/*` and `providers/*` — `logout` and
-  `providers/disable` clear the route and send Claude Code back to its own
-  login, the others install a different upstream.
+- `authenticate`, `logout`, `auth/*`, `_auth/*`, `providers/*` and
+  `_providers/*` — `logout` and `providers/disable` clear the route and send
+  Claude Code back to its own login, the others install a different upstream.
 - `session/set_model` and the `model` config option for anything but the frozen
   model. Re-selecting the frozen model is answered as a no-op.
 - `_meta.claudeCode.options` on session setup loses `model`, `fallbackModel`,
@@ -408,12 +432,17 @@ model entry (and a `models` state, should a pin send one) in a result or a
 answers that model without starting a discovery probe, which would run on the
 host's own credentials and routing.
 
-Nothing the adapter prints is trusted to keep the route's secrets. Every stdout
-and stderr line has the token, the gateway base URL, its host and its hostname
-replaced with `[redacted]` before it is parsed, forwarded or logged — the
-adapter itself logs `[providers/set] ... baseUrl=...` — and every adapter error
-response keeps its `code` but loses its `message` and `data`, which can carry a
-provider response. Diagnostics stay in the log rather than being dropped.
+Nothing the adapter prints on a route is trusted. Its stderr is not logged at
+all, only how many lines it wrote, and a stdout line that is not a frame is
+logged by length, not content: the adapter logs `[providers/set] ... baseUrl=`,
+and Claude Code echoes a failed request with the upstream's response body, its
+host and path, and paths of the machine it runs on. Scrubbing known secrets out
+of that text would still keep the rest. Every adapter error response keeps its
+`code` but loses its `message` and `data`. ACP frames are still forwarded, with
+the token, the gateway base URL, its host and its hostname replaced with
+`[redacted]`; an agent message can quote an upstream error in its own text, and
+nothing distinguishes that from the model's answer, so such text is scrubbed but
+not removed. On a local host all of this is logged verbatim, as before.
 
 ## Model discovery
 
@@ -474,11 +503,12 @@ Targets are how a `plugin.log` is read: `plugin` (activation, start/stop,
 deactivation), `host-call` (every `agent/*` method with duration and outcome),
 `lifecycle`, `acp` (frame envelopes only — `method` and `id`, never `params`),
 `claude-client` (spawn, pid, exit, pipe failures), `claude-agent-acp` (the live
-adapter's own stderr, one record per line at `info`), `effects` (barrier, drain,
-restart, readiness), `models` and `acp-probe` (discovery; the probe adapter's
-stderr is `claude-agent-acp.probe` at `debug`), and `command` (which adapter was
-resolved and how). ACP payloads are never logged: a `session/prompt` carries the
-user's text, and the log has no business keeping it.
+adapter's own stderr, one record per line at `info`; nothing on a platform
+route, where `claude-client` records only a line count), `effects` (barrier,
+drain, restart, readiness), `models` and `acp-probe` (discovery; the probe
+adapter's stderr is `claude-agent-acp.probe` at `debug`), and `command` (which
+adapter was resolved and how). ACP payloads are never logged: a `session/prompt`
+carries the user's text, and the log has no business keeping it.
 
 ## Manifest
 
@@ -512,7 +542,8 @@ Ora parses and validates that table today but does not yet enforce it.
 - One test reads `src/main.ts` as text to assert the effect wiring is present.
   That is deliberate: the entrypoint calls `runAgentPlugin` at module scope, so
   importing it would start serving the host, and the wiring it guards is exactly
-  the kind whose absence is invisible at runtime.
+  the kind whose absence is invisible at runtime. Anything else `main.ts` would
+  decide belongs in a handler a test can call, as `agent/list_models` does.
 - Bump `orax.toml` `version` before handing someone a `.orax` to import.
   `install_local` refuses a version that is already installed and never retires
   older ones, so reusing a number silently leaves the old code running. Keep
