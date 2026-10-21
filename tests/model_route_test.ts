@@ -234,6 +234,7 @@ Deno.test("a client cannot replace, drop or re-authenticate the platform route",
       [14, "providers/set"],
       [15, "providers/disable"],
       [16, "providers/list"],
+      [17, "_providers/set"],
     ] as const
   ) {
     await client.writeAcp({
@@ -248,7 +249,7 @@ Deno.test("a client cannot replace, drop or re-authenticate the platform route",
   assertEquals(adapter.written.length, 1);
   assertEquals(
     forwarded.map((frame) => (frame as { id: number }).id),
-    [11, 12, 13, 14, 15, 16],
+    [11, 12, 13, 14, 15, 16, 17],
   );
   for (const frame of forwarded) {
     assertEquals((frame as { error: { code: number } }).error.code, -32601);

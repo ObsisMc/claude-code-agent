@@ -36,7 +36,7 @@ const REDACTED = "[redacted]";
 function isRouteMutation(method: string): boolean {
   return method === "authenticate" || method === "logout" ||
     method.startsWith("auth/") || method.startsWith("_auth/") ||
-    method.startsWith("providers/");
+    method.startsWith("providers/") || method.startsWith("_providers/");
 }
 
 /**
