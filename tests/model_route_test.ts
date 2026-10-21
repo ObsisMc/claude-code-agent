@@ -633,6 +633,25 @@ Deno.test("a route the adapter could not prepare fails the start as retryable", 
   assertEquals(adapter.killed, 1);
 });
 
+Deno.test("an adapter waiting for its route is running but not ready", async () => {
+  const adapter = new ScriptedAdapter("hold");
+  const client = new ClaudeClient({
+    spawn: (_cwd, env) => adapter.spawn(env),
+  });
+  const started = startClaude(client, {
+    cwd: "/workspace",
+    hostVersion: "1.0.0",
+    modelContext: context(),
+  });
+  await waitFor(() => adapter.written.length === 1);
+  assertEquals([client.running, client.ready], [true, false]);
+  adapter.acceptRoute();
+  await started;
+  assertEquals([client.running, client.ready], [true, true]);
+  await client.stop();
+  assertEquals(client.ready, false);
+});
+
 async function platformClient() {
   const adapter = new ScriptedAdapter("accept");
   const forwarded: JsonValue[] = [];

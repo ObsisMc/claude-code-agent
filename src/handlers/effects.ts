@@ -239,7 +239,7 @@ export class SkillEffectCoordinator {
    * returned.
    */
   #verifyReady(context: AgentEffectReadinessContext): JsonValue {
-    if (!this.#client.running) {
+    if (!this.#client.ready) {
       log.info("effect/verify_ready: not ready, adapter not running", {
         method: "effect/verify_ready",
         context: { targetId: context.targetId },

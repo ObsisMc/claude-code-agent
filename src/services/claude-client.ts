@@ -85,6 +85,8 @@ export class ClaudeClient {
   /** Supplied by `attachProcesses` once the plugin's `Plugin` instance exists; see `main.ts`. */
   #processes: HostProcesses | undefined;
   #running: RunningProcess | undefined;
+  /** Whether the running generation's route, if any, was accepted; reset by every start. */
+  #routeApplied = false;
   #expectedExit = false;
   /** The platform route every generation of the adapter starts with; absent on a local host. */
   #route: ModelRoute | undefined;
@@ -108,6 +110,15 @@ export class ClaudeClient {
 
   get running(): boolean {
     return this.#running !== undefined;
+  }
+
+  /**
+   * Whether the adapter is up and on the route it must use: a process that is still waiting for
+   * `providers/set` is running, but it would resolve a session on whatever routing it found.
+   */
+  get ready(): boolean {
+    return this.#running !== undefined &&
+      (this.#route === undefined || this.#routeApplied);
   }
 
   /**
@@ -146,6 +157,7 @@ export class ClaudeClient {
     const restarting = this.#running !== undefined;
     await this.stop();
     this.#expectedExit = false;
+    this.#routeApplied = false;
 
     log.info(restarting ? "restarting the adapter" : "starting the adapter", {
       context: { cwd },
@@ -169,6 +181,7 @@ export class ClaudeClient {
         await this.stop();
         throw error;
       }
+      this.#routeApplied = true;
     }
     log.info("adapter running", {
       context: { cwd, pid: process.pid, platformRoute: route !== undefined },
