@@ -474,6 +474,8 @@ Ora parses and validates that table today but does not yet enforce it.
   `HostProcesses` that scripts an ACP peer, and effect coordination against a
   `ClaudeClient` with a scripted `spawn`. `deno task simulate` needs a real
   `claude-agent-acp` on PATH (`npm i -g @agentclientprotocol/claude-agent-acp`).
+- CI (`.github/workflows/ci.yml`) runs `check`, `lint` and `test` on every pull
+  request and push to `main`; none of them needs a CLI.
 - One test reads `src/main.ts` as text to assert the effect wiring is present.
   That is deliberate: the entrypoint calls `runAgentPlugin` at module scope, so
   importing it would start serving the host, and the wiring it guards is exactly
