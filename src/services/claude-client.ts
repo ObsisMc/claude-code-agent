@@ -115,7 +115,9 @@ export class ClaudeClient {
    */
   useRoute(route: ModelRoute | undefined): void {
     this.#route = route;
-    this.#guard = route === undefined ? undefined : new ModelGuard(route.model);
+    this.#guard = route === undefined
+      ? undefined
+      : new ModelGuard(route.model, routeSecrets(route));
   }
 
   /**
@@ -317,7 +319,9 @@ export class ClaudeClient {
    */
   async #pumpStdout(process: SpawnedProcess): Promise<void> {
     try {
-      for await (const line of decodeLines(process.stdout)) {
+      for await (const raw of decodeLines(process.stdout)) {
+        // Scrubbed before anything reads it, so neither Ora nor the log below sees a secret.
+        const line = this.#guard?.scrub(raw) ?? raw;
         let frame: JsonValue;
         try {
           frame = JSON.parse(line) as JsonValue;
@@ -371,7 +375,10 @@ export class ClaudeClient {
     try {
       for await (const line of decodeLines(process.stderr)) {
         if (line.length > 0) {
-          adapterLog.info(line, { context: { pid: process.pid } });
+          // The adapter logs the gateway it routes to, and the CLI may echo a failed request.
+          adapterLog.info(this.#guard?.scrub(line) ?? line, {
+            context: { pid: process.pid },
+          });
         }
       }
     } catch (error) {
@@ -413,6 +420,20 @@ export class ClaudeClient {
       exited: child.exited.then(() => undefined),
     };
   }
+}
+
+/**
+ * What must never leave the adapter on a platform route: the token, and the gateway address in
+ * every spelling a message is likely to use (base URL, host with port, bare hostname).
+ */
+function routeSecrets(route: ModelRoute): string[] {
+  const gateway = new URL(route.provider.baseUrl);
+  return [
+    ...Object.values(route.provider.headers),
+    route.provider.baseUrl,
+    gateway.host,
+    gateway.hostname,
+  ];
 }
 
 /** The envelope fields of one frame that are safe to log: never its params or result. */

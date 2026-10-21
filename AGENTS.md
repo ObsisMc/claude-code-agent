@@ -408,6 +408,13 @@ model entry (and a `models` state, should a pin send one) in a result or a
 answers that model without starting a discovery probe, which would run on the
 host's own credentials and routing.
 
+Nothing the adapter prints is trusted to keep the route's secrets. Every stdout
+and stderr line has the token, the gateway base URL, its host and its hostname
+replaced with `[redacted]` before it is parsed, forwarded or logged — the
+adapter itself logs `[providers/set] ... baseUrl=...` — and every adapter error
+response keeps its `code` but loses its `message` and `data`, which can carry a
+provider response. Diagnostics stay in the log rather than being dropped.
+
 ## Model discovery
 
 `claude-agent-acp` is a pure ACP server: it takes no subcommand, and its

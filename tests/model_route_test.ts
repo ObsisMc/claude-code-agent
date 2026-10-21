@@ -2,6 +2,8 @@ import { assertEquals, assertRejects } from "@std/assert";
 import {
   AGENT_UNUSABLE,
   type AgentModelContext,
+  createLogger,
+  createStderrLogSink,
   type HostChildProcessOptions,
   HostRequestError,
   INVALID_PARAMS,
@@ -14,6 +16,7 @@ import {
 } from "../src/services/claude-client.ts";
 import { bundledAdapterPath } from "../src/services/bundled-binary.ts";
 import { BIN_ENV_VAR } from "../src/services/command.ts";
+import { installLogger } from "../src/services/log.ts";
 import { modelRoute } from "../src/services/model-route.ts";
 
 const TOKEN = "synthetic-temporary-token";
@@ -497,6 +500,84 @@ Deno.test("model discovery on a platform route answers the frozen model without 
   assertEquals(new ClaudeClient().frozenModel, undefined);
 });
 
+Deno.test("adapter errors reach Ora with their code but without their text", async () => {
+  const { adapter, client, forwarded } = await platformClient();
+  adapter.emit({
+    jsonrpc: "2.0",
+    id: 7,
+    error: {
+      code: -32000,
+      message: "401 from https://other.invalid: bad key",
+      data: { headers: { "x-api-key": "leaked" } },
+    },
+  });
+  adapter.emit({ jsonrpc: "2.0", id: 8, error: "not an object" });
+  await waitFor(() => forwarded.length === 2);
+  assertEquals(forwarded, [
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      error: {
+        code: -32000,
+        message: "The Claude agent could not complete the request",
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 8,
+      error: {
+        code: -32603,
+        message: "The Claude agent could not complete the request",
+      },
+    },
+  ]);
+  await client.stop();
+});
+
+Deno.test("the token and gateway address never leave the adapter's output", async () => {
+  const records: string[] = [];
+  installLogger(createLogger({ write: (line) => records.push(line) }));
+  try {
+    const { adapter, client, forwarded } = await platformClient();
+    adapter.emit({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text:
+              `API Error calling https://gateway.internal:8443/runtime/anthropic/v1/messages with ${TOKEN}; gateway.internal unreachable`,
+          },
+        },
+      },
+    });
+    adapter.emitLine(`not json ${TOKEN} gateway.internal:8443`);
+    adapter.emitStderr(
+      `[providers/set] apiType=anthropic baseUrl=https://gateway.internal:8443/runtime/anthropic key=${TOKEN}`,
+    );
+    await waitFor(() =>
+      forwarded.length === 1 &&
+      records.some((record) => record.includes("providers/set")) &&
+      records.some((record) => record.includes("non-JSON"))
+    );
+    const text = JSON.stringify(forwarded) + records.join("\n");
+    assertEquals(text.includes(TOKEN), false);
+    assertEquals(text.includes("gateway.internal"), false);
+    assertEquals(
+      (forwarded[0] as {
+        params: { update: { content: { text: string } } };
+      }).params.update.content.text,
+      "API Error calling [redacted]/v1/messages with [redacted]; [redacted] unreachable",
+    );
+    await client.stop();
+  } finally {
+    installLogger(createLogger(createStderrLogSink()));
+  }
+});
+
 /** A client started on the platform route, with the route request already answered. */
 async function platformClient() {
   const adapter = new ScriptedAdapter("accept");
@@ -523,6 +604,7 @@ class ScriptedAdapter {
   readonly environments: Record<string, string>[] = [];
   killed = 0;
   #stdout: ReadableStreamDefaultController<Uint8Array> | undefined;
+  #stderr: ReadableStreamDefaultController<Uint8Array> | undefined;
 
   constructor(readonly answer: "accept" | "reject") {}
 
@@ -557,16 +639,31 @@ class ScriptedAdapter {
           this.#stdout = controller;
         },
       }),
-      stderr: new ReadableStream({ start: (controller) => controller.close() }),
+      stderr: new ReadableStream({
+        start: (controller) => {
+          this.#stderr = controller;
+        },
+      }),
       exited: new Promise((resolve) => {
         ended = () => resolve();
       }),
       kill: () => {
         this.killed += 1;
         this.#stdout?.close();
+        this.#stderr?.close();
         ended?.();
       },
     };
+  }
+
+  /** Writes one diagnostic line to the current generation's stderr. */
+  emitStderr(line: string): void {
+    this.#stderr?.enqueue(new TextEncoder().encode(`${line}\n`));
+  }
+
+  /** Writes one raw line to the current generation's stdout. */
+  emitLine(line: string): void {
+    this.#stdout?.enqueue(new TextEncoder().encode(`${line}\n`));
   }
 
   /** Writes one NDJSON frame to the current generation's stdout. */

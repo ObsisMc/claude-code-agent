@@ -19,6 +19,11 @@ export type InboundDecision =
 const METHOD_NOT_AVAILABLE = -32601;
 /** JSON-RPC "invalid params": a model other than the frozen one was asked for. */
 const MODEL_FROZEN = -32602;
+/** What every adapter error says instead; its own text can quote the gateway, a header or a body. */
+const REDACTED_ERROR_MESSAGE =
+  "The Claude agent could not complete the request";
+/** What a secret is replaced with wherever it would otherwise reach Ora or a log. */
+const REDACTED = "[redacted]";
 
 /**
  * Methods that would hand the adapter another upstream, another credential, or none at all.
@@ -69,16 +74,35 @@ const SESSION_SETUP = new Set([
  * upstream or model, strips session options that would do the same, narrows every model selector
  * the adapter reports to the frozen model, and remembers each session's config options so
  * re-selecting the frozen model can be answered without reaching the adapter.
+ *
+ * It also keeps the route's secrets in the adapter: adapter error text is replaced, and the token
+ * and gateway address are scrubbed from every line the adapter prints before it is forwarded or
+ * logged (ADR D2: raw provider and CLI errors are not shown, tokens never enter logs).
  */
 export class ModelGuard {
   readonly #model: FrozenModel;
+  /** Longest first, so a URL is replaced whole before the host inside it is. */
+  readonly #secrets: readonly string[];
   /** Ora's outstanding requests whose answer belongs to a session the request named. */
   readonly #pendingSessions = new Map<string, string>();
   /** The config options each session last reported, to answer a no-op model change. */
   readonly #configOptions = new Map<string, JsonValue[]>();
 
-  constructor(model: FrozenModel) {
+  constructor(model: FrozenModel, secrets: readonly string[] = []) {
     this.#model = model;
+    this.#secrets = [...new Set(secrets.filter((secret) => secret !== ""))]
+      .sort((a, b) => b.length - a.length);
+  }
+
+  /** Replaces every secret in one line of adapter output before it is parsed, sent or logged. */
+  scrub(text: string): string {
+    let scrubbed = text;
+    for (const secret of this.#secrets) {
+      if (scrubbed.includes(secret)) {
+        scrubbed = scrubbed.split(secret).join(REDACTED);
+      }
+    }
+    return scrubbed;
   }
 
   /** The model `agent/list_models` reports: the frozen one, never anything discovered. */
@@ -134,6 +158,20 @@ export class ModelGuard {
     const sessionId = hasId(frame)
       ? this.#takePendingSession(frame.id)
       : undefined;
+    if ("error" in frame) {
+      // The code still tells Ora what kind of failure this was; the text and data are the
+      // adapter's, and may carry a provider response or the gateway's address.
+      const code = isObject(frame.error) ? frame.error.code : undefined;
+      return {
+        ...frame,
+        error: {
+          code: typeof code === "number" && Number.isInteger(code)
+            ? code
+            : -32603,
+          message: REDACTED_ERROR_MESSAGE,
+        },
+      };
+    }
     if (!isObject(frame.result)) return frame;
     const result = this.#narrowModels(frame.result);
     const owner = typeof result.sessionId === "string"
