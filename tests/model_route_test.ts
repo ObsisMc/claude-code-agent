@@ -50,6 +50,7 @@ Deno.test("a frozen context becomes one pinned Messages route", () => {
       declarationFingerprint: "b".repeat(64),
       configurationRevision: 7,
     },
+    model: { id: "team/claude", name: "Team Claude" },
     provider: {
       providerId: "main",
       apiType: "anthropic",
@@ -189,6 +190,174 @@ Deno.test("a local start keeps the adapter's own routing and confirms nothing", 
   assertEquals(adapter.written, []);
   await client.stop();
 });
+
+Deno.test("a client cannot replace, drop or re-authenticate the platform route", async () => {
+  const { adapter, client, forwarded } = await platformClient();
+  for (
+    const [id, method] of [
+      [11, "authenticate"],
+      [12, "logout"],
+      [13, "auth/logout"],
+      [14, "providers/set"],
+      [15, "providers/disable"],
+      [16, "providers/list"],
+    ] as const
+  ) {
+    await client.writeAcp({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: { providerId: "main", baseUrl: "https://other.invalid" },
+    });
+  }
+  // A notification has nobody to answer and is simply not delivered.
+  await client.writeAcp({ jsonrpc: "2.0", method: "providers/disable" });
+  assertEquals(adapter.written.length, 1);
+  assertEquals(
+    forwarded.map((frame) => (frame as { id: number }).id),
+    [11, 12, 13, 14, 15, 16],
+  );
+  for (const frame of forwarded) {
+    assertEquals((frame as { error: { code: number } }).error.code, -32601);
+  }
+  await client.stop();
+});
+
+Deno.test("a client can only ever select the frozen model", async () => {
+  const { adapter, client, forwarded } = await platformClient();
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "session/set_model",
+    params: { sessionId: "s1", modelId: "opus" },
+  });
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "session/set_config_option",
+    params: { sessionId: "s1", configId: "model", value: "sonnet" },
+  });
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "session/set_model",
+    params: { sessionId: "s1", modelId: "team/claude" },
+  });
+  // Re-selecting the frozen model is a no-op answered with what the session last reported.
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "session/load",
+    params: { sessionId: "s1", cwd: "/workspace", mcpServers: [] },
+  });
+  const options = [{ id: "mode", currentValue: "default", options: [] }];
+  adapter.emit({ jsonrpc: "2.0", id: 4, result: { configOptions: options } });
+  await waitFor(() => forwarded.length === 4);
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 5,
+    method: "session/set_config_option",
+    params: { sessionId: "s1", configId: "model", value: "team/claude" },
+  });
+  // Every other option still reaches the adapter.
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 6,
+    method: "session/set_config_option",
+    params: { sessionId: "s1", configId: "mode", value: "plan" },
+  });
+  assertEquals(
+    adapter.written.map((frame) => (frame as { id: string | number }).id),
+    ["ora-claude-model-route-1", 4, 6],
+  );
+  assertEquals(forwarded[0], {
+    jsonrpc: "2.0",
+    id: 1,
+    error: {
+      code: -32602,
+      message: "this execution is fixed to the model team/claude",
+    },
+  });
+  assertEquals(
+    (forwarded[1] as { error: { code: number } }).error.code,
+    -32602,
+  );
+  assertEquals(forwarded[2], { jsonrpc: "2.0", id: 3, result: {} });
+  assertEquals(forwarded[4], {
+    jsonrpc: "2.0",
+    id: 5,
+    result: { configOptions: options },
+  });
+  await client.stop();
+});
+
+Deno.test("session options cannot choose another model, CLI or environment", async () => {
+  const { adapter, client } = await platformClient();
+  await client.writeAcp({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "session/new",
+    params: {
+      cwd: "/workspace",
+      mcpServers: [],
+      _meta: {
+        claudeCode: {
+          options: {
+            model: "opus",
+            fallbackModel: "sonnet",
+            env: { ANTHROPIC_MODEL: "opus" },
+            settings: { model: "opus" },
+            extraArgs: { model: "opus" },
+            executable: "node",
+            executableArgs: ["--inspect"],
+            pathToClaudeCodeExecutable: "/tmp/claude",
+            maxTurns: 3,
+          },
+        },
+        other: true,
+      },
+    },
+  });
+  assertEquals(adapter.written[1], {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "session/new",
+    params: {
+      cwd: "/workspace",
+      mcpServers: [],
+      _meta: { claudeCode: { options: { maxTurns: 3 } }, other: true },
+    },
+  });
+  await client.stop();
+});
+
+Deno.test("a local start passes every ACP frame through untouched", async () => {
+  const adapter = new ScriptedAdapter("accept");
+  const client = new ClaudeClient({
+    spawn: (_cwd, env) => adapter.spawn(env),
+  });
+  await startClaude(client, { cwd: "/workspace", hostVersion: "1.0.0" });
+  const frame = { jsonrpc: "2.0", id: 1, method: "providers/set", params: {} };
+  await client.writeAcp(frame);
+  assertEquals(adapter.written, [frame]);
+  await client.stop();
+});
+
+/** A client started on the platform route, with the route request already answered. */
+async function platformClient() {
+  const adapter = new ScriptedAdapter("accept");
+  const forwarded: JsonValue[] = [];
+  const client = new ClaudeClient({
+    spawn: (_cwd, env) => adapter.spawn(env),
+    onAcpFrame: (frame) => forwarded.push(frame),
+  });
+  await startClaude(client, {
+    cwd: "/workspace",
+    hostVersion: "1.0.0",
+    modelContext: context(),
+  });
+  return { adapter, client, forwarded };
+}
 
 /**
  * A `claude-agent-acp` stand-in that answers `providers/set` and records what it was given.

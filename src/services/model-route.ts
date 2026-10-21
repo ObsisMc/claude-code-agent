@@ -4,6 +4,7 @@ import {
   INVALID_PARAMS,
   PluginMethodError,
 } from "@ora-space/plugin-sdk";
+import type { FrozenModel } from "./model-guard.ts";
 
 /** The adapter's single client-managed provider slot, as `providers/list` names it. */
 const PROVIDER_ID = "main";
@@ -21,6 +22,8 @@ const PROVIDER_ID = "main";
  */
 export interface ModelRoute {
   readonly applied: AgentModelApplied;
+  /** The one model this execution may use; every selector and switch is held to it. */
+  readonly model: FrozenModel;
   readonly provider: {
     readonly providerId: string;
     readonly apiType: "anthropic";
@@ -62,6 +65,7 @@ export function modelRoute(context: AgentModelContext): ModelRoute {
       declarationFingerprint: configuration.declarationFingerprint,
       configurationRevision: configuration.configurationRevision,
     },
+    model: { id: model, name: configuration.model.name },
     provider: {
       providerId: PROVIDER_ID,
       apiType: "anthropic",

@@ -382,6 +382,20 @@ and consumes its answer by id before forwarding anything, so Ora never sees
 either frame. A different `claude-agent-acp` pin must be checked for the same
 `providers/set` behaviour before it ships with a declaration.
 
+Applying the route once is not enough: the same ACP connection could undo it. On
+a platform route `services/model-guard.ts` reads Ora's frames before they reach
+the adapter and answers these itself, so the adapter never sees them:
+
+- `authenticate`, `logout`, `auth/*`, `_auth/*` and `providers/*` — `logout` and
+  `providers/disable` clear the route and send Claude Code back to its own
+  login, the others install a different upstream.
+- `session/set_model` and the `model` config option for anything but the frozen
+  model. Re-selecting the frozen model is answered as a no-op.
+- `_meta.claudeCode.options` on session setup loses `model`, `fallbackModel`,
+  `env`, `settings`, `extraArgs` and the executable overrides: the adapter
+  spreads them over its own environment, where they would outrank the pinned
+  aliases.
+
 ## Model discovery
 
 `claude-agent-acp` is a pure ACP server: it takes no subcommand, and its

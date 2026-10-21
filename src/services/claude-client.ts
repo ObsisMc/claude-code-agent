@@ -6,6 +6,7 @@ import {
 } from "@ora-space/plugin-sdk";
 import { spawnClaude } from "./command.ts";
 import { logger } from "./log.ts";
+import { ModelGuard } from "./model-guard.ts";
 import type { ModelRoute } from "./model-route.ts";
 import { decodeLines, encodeLine } from "./ndjson.ts";
 
@@ -55,8 +56,10 @@ interface RunningProcess {
  * directory from the spawn cwd, and receives every per-session directory through ACP `session/new`.
  * The plugin owns its whole lifetime — spawn on `agent/start`, kill on `agent/stop`, respawn on an
  * Effect `reactivate` — so Ora never sees the child's stdio, which is what lets Claude Code use ACP
- * methods this host has never heard of. Nothing here parses ACP; frames are re-framed between Ora's
- * binary envelope and the adapter's NDJSON and otherwise passed through verbatim.
+ * methods this host has never heard of. Without a platform route nothing here parses ACP; frames
+ * are re-framed between Ora's binary envelope and the adapter's NDJSON and otherwise passed
+ * through verbatim. With one, {@link ModelGuard} reads the frames that could change the route or
+ * the model.
  */
 export class ClaudeClient {
   readonly #spawn: (
@@ -71,6 +74,8 @@ export class ClaudeClient {
   #expectedExit = false;
   /** The platform route every generation of the adapter starts with; absent on a local host. */
   #route: ModelRoute | undefined;
+  /** Holds every ACP frame of a platform-model execution to its route and model. */
+  #guard: ModelGuard | undefined;
   /** This bridge's own outstanding requests, answered from stdout and never forwarded to Ora. */
   readonly #pending = new Map<string, (frame: JsonValue) => void>();
   #nextRequest = 0;
@@ -105,6 +110,7 @@ export class ClaudeClient {
    */
   useRoute(route: ModelRoute | undefined): void {
     this.#route = route;
+    this.#guard = route === undefined ? undefined : new ModelGuard(route.model);
   }
 
   /**
@@ -165,7 +171,7 @@ export class ClaudeClient {
       timer = setTimeout(() => resolve(undefined), ROUTE_TIMEOUT_MS);
     });
     try {
-      await this.writeAcp({
+      await this.#write({
         jsonrpc: "2.0",
         id,
         method: "providers/set",
@@ -200,8 +206,37 @@ export class ClaudeClient {
    *
    * Awaiting the write is what lets the adapter's backpressure reach the host instead of growing
    * an unbounded queue inside this process.
+   *
+   * On a platform route, every frame from Ora passes the {@link ModelGuard} first: a request that
+   * would replace the route or the model is answered here with an error and never reaches the
+   * adapter, which is the only way to keep a client from undoing what `providers/set` applied.
    */
   async writeAcp(frame: JsonValue): Promise<void> {
+    const decision = this.#guard?.inbound(frame) ?? { forward: frame };
+    if ("reply" in decision) {
+      log.info(
+        "answered a host ACP request the platform route does not allow",
+        {
+          context: summarize(frame),
+        },
+      );
+      this.#onAcpFrame(decision.reply);
+      return;
+    }
+    if ("drop" in decision) {
+      log.info(
+        "dropped a host ACP notification the platform route does not allow",
+        {
+          context: summarize(frame),
+        },
+      );
+      return;
+    }
+    await this.#write(decision.forward);
+  }
+
+  /** Writes one frame into the adapter's stdin as-is; this bridge's own requests come here. */
+  async #write(frame: JsonValue): Promise<void> {
     const running = this.#running;
     if (running === undefined) {
       throw new Error("the Claude agent is not running");
@@ -307,7 +342,7 @@ export class ClaudeClient {
         log.debug("adapter ACP frame received", {
           context: { pid: process.pid, ...summarize(frame) },
         });
-        this.#onAcpFrame(frame);
+        this.#onAcpFrame(this.#guard?.outbound(frame) ?? frame);
       }
       log.debug("adapter stdout reached EOF", {
         context: { pid: process.pid },
