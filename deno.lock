@@ -1,7 +1,7 @@
 {
   "version": "5",
   "specifiers": {
-    "jsr:@ora-space/plugin-sdk@0.10.0": "0.10.0",
+    "jsr:@ora-space/plugin-sdk@0.11.0": "0.11.0",
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/cli@^1.0.32": "1.0.32",
     "jsr:@std/crypto@^1.0.5": "1.1.0",
@@ -15,8 +15,8 @@
     "jsr:@zip-js/zip-js@^2.8.61": "2.9.0"
   },
   "jsr": {
-    "@ora-space/plugin-sdk@0.10.0": {
-      "integrity": "f678d20ea69f3da2a692faa174743818806c95b998ae23e5b11284c7a6d37c94"
+    "@ora-space/plugin-sdk@0.11.0": {
+      "integrity": "9f48ecd28061d152f9018720499804bdaa5dd2c6be15f297e3b580940764f75b"
     },
     "@std/assert@1.0.19": {
       "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
@@ -64,7 +64,7 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@ora-space/plugin-sdk@0.10.0",
+      "jsr:@ora-space/plugin-sdk@0.11.0",
       "jsr:@std/assert@1",
       "jsr:@std/cli@^1.0.32",
       "jsr:@std/crypto@^1.0.5",

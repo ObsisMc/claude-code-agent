@@ -252,14 +252,14 @@ Deno.test("the bundled adapter is asked for before anything on PATH", async () =
   assertEquals(Object.hasOwn(spawns[0], "command"), false);
 });
 
-Deno.test("the compiled adapter pins its CLI with this package's own variable", async () => {
+Deno.test("the compiled adapter never honours an inherited CLAUDE_CODE_EXECUTABLE", async () => {
   const entry = await Deno.readTextFile(
     new URL("../scripts/adapter-entry.mjs", import.meta.url),
   );
-  assertEquals(entry.includes('"ORA_CLAUDE_BIN"'), true);
-  // Read as text because this file is compiled by Bun into a separate process and never imported
-  // here. `CLAUDE_CODE_EXECUTABLE` may only ever be written, never read: honouring an inherited
-  // one would run a different CLI than the package ships, and nothing would say so.
+  // Read as text because importing this file starts the adapter; which CLI it resolves is tested
+  // through `resolve-claude-cli.mjs` itself. `CLAUDE_CODE_EXECUTABLE` may only ever be written,
+  // never read: honouring an inherited one would run a different CLI than the package ships, and
+  // nothing would say so.
   assertEquals(
     entry.includes("process.env.CLAUDE_CODE_EXECUTABLE ="),
     true,
@@ -497,6 +497,36 @@ Deno.test("a repeated reactivation does not restart an already rescanned adapter
   // came back after the first one.
   assertEquals(spawns.length, 2);
   await client.stop();
+});
+
+Deno.test("a restart that fails still lowers the barrier", async () => {
+  const written: JsonValue[] = [];
+  let spawns = 0;
+  const client = new ClaudeClient({
+    spawn: () => {
+      spawns += 1;
+      // The second spawn is the reactivation restart; a route the adapter refused fails it alike.
+      if (spawns > 1) throw new Error("the adapter could not be spawned");
+      return scriptedProcess(written);
+    },
+  });
+  await client.start("/workspace");
+  const effects = new SkillEffectCoordinator(client, () => "/workspace");
+  await effects.definition.coordinate({ targetId: "t1", resourceIds: ["r1"] });
+  const held = { jsonrpc: "2.0", id: 9, method: "session/prompt" };
+  await forwardAcpFrame(client, effects, held);
+
+  await assertRejects(() =>
+    Promise.resolve(effects.definition.reactivate({
+      targetId: "t1",
+      resourceIds: ["r1"],
+    }))
+  );
+  // Nothing is left behind the barrier: a later turn is no longer absorbed, and nothing was
+  // written into an adapter that is not running.
+  const later = { jsonrpc: "2.0", id: 10, method: "session/prompt" };
+  assertEquals(effects.intercept(later), false);
+  assertEquals(written, []);
 });
 
 Deno.test("NDJSON reassembles frames split across chunks and CRLF", async () => {

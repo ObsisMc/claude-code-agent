@@ -1,0 +1,34 @@
+name: CI
+
+# Runs the repository's own tasks rather than spelling out commands. None of them needs the Claude
+# CLI; type checking also catches an @ora-space/plugin-sdk version that is not published yet.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type check
+        run: deno task check
+
+      - name: Lint
+        run: deno task lint
+
+      - name: Test
+        run: deno task test

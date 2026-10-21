@@ -1,11 +1,11 @@
 import type {
   AcpSender,
   AgentModel,
+  AgentModelApplied,
   AgentStartContext,
   HostProcesses,
   JsonValue,
 } from "@ora-space/plugin-sdk";
-import { AGENT_METHODS } from "@ora-space/plugin-sdk";
 import {
   type AgentListModelsContext,
   AgentPlugin,
@@ -18,13 +18,11 @@ import { startClaude, stopClaude } from "./handlers/lifecycle.ts";
 import {
   invalidateAllClaudeModels,
   invalidateClaudeModels,
-  listClaudeModels,
+  listAgentModels,
 } from "./handlers/models.ts";
 import { ClaudeClient } from "./services/claude-client.ts";
 import { logger } from "./services/log.ts";
-
-/** Must match `ora.id` in package.json, which is also this agent's identity inside Ora. */
-const PLUGIN_ID = "ora-space.claude";
+import { PLUGIN_ID } from "./services/model-route.ts";
 
 /**
  * Publishes Claude Code as an Ora agent.
@@ -95,7 +93,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
   override onStart = async (
     context: AgentStartContext,
     send: AcpSender,
-  ): Promise<void> => {
+  ): Promise<AgentModelApplied | void> => {
     this.#log.info("agent start requested", {
       context: { cwd: context.cwd, previousCwd: this.#cwd },
     });
@@ -105,7 +103,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
     this.#send = send;
     this.#cwd = context.cwd;
     invalidateClaudeModels(context.cwd);
-    await startClaude(this.#client, context);
+    return await startClaude(this.#client, context);
   };
 
   override onStop = async (): Promise<void> => {
@@ -118,16 +116,8 @@ class ClaudeAgentPlugin extends AgentPlugin {
 
   override onListModels = (
     context: AgentListModelsContext,
-  ): Promise<AgentModel[]> => {
-    if (this.#processes === undefined) {
-      throw new Error(
-        `${AGENT_METHODS.listModels} was called before activation`,
-      );
-    }
-    // Discovery is answered for the Workspace the host named, not for `#cwd`: `agent/start` gets a
-    // neutral directory, and a user can open pickers for a project this connection never ran in.
-    return listClaudeModels(this.#processes, context.cwd);
-  };
+  ): Promise<AgentModel[]> =>
+    listAgentModels(this.#client, this.#processes, context.cwd);
 
   override onAcp = (frame: JsonValue): Promise<void> | void =>
     forwardAcpFrame(this.#client, this.#effects, frame);

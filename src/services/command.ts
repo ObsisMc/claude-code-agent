@@ -1,5 +1,6 @@
 import {
   AGENT_NOT_INSTALLED,
+  AGENT_UNUSABLE,
   type AgentInvocation,
   type HostChildProcess,
   type HostProcesses,
@@ -74,6 +75,38 @@ export function spawnClaude(
     return spawnPinned(processes, pinned, invocation);
   }
   return spawnResolved(processes, invocation);
+}
+
+/**
+ * Spawns only the adapter this package ships, for a platform-model execution.
+ *
+ * A platform route is applied to, and tested against, the adapter and CLI pair this package
+ * bundles; `ORA_CLAUDE_ACP_BIN` or an install on PATH could be any other build, with any other
+ * idea of what `providers/set` means. So neither is consulted, and a package that cannot run its
+ * own adapter fails the start as `AGENT_UNUSABLE` rather than looking further. The CLI the
+ * adapter drives is held to the bundled one by `ORA_CLAUDE_BUNDLED_CLI_ONLY` in the route's
+ * environment, which `scripts/adapter-entry.mjs` reads.
+ */
+export async function spawnBundledClaude(
+  processes: HostProcesses,
+  invocation: AgentInvocation,
+): Promise<HostChildProcess> {
+  const packageCommand = bundledAdapterPath();
+  log.info("spawning the bundled adapter for a platform route", {
+    context: { cwd: invocation.cwd, packageCommand },
+  });
+  try {
+    return await processes.spawn({ packageCommand, ...invocation });
+  } catch (error) {
+    log.warn("the bundled adapter could not be spawned", {
+      context: { cwd: invocation.cwd, packageCommand },
+      error,
+    });
+    throw new PluginMethodError(
+      AGENT_UNUSABLE,
+      "this package's bundled Claude ACP adapter cannot run, and a platform model route uses no other",
+    );
+  }
 }
 
 /**
