@@ -85,6 +85,9 @@ export function modelRoute(context: AgentModelContext): ModelRoute {
       // sandbox for Anthropic's own endpoints, which the platform route does not cover.
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_AUTOUPDATER: "1",
+      // Holds the adapter to the CLI bundled beside it: `ORA_CLAUDE_BIN` and a local install are
+      // ignored, see `scripts/adapter-entry.mjs`.
+      ORA_CLAUDE_BUNDLED_CLI_ONLY: "1",
     },
   };
 }

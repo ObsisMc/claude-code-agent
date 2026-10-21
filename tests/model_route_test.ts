@@ -2,6 +2,8 @@ import { assertEquals, assertRejects } from "@std/assert";
 import {
   AGENT_UNUSABLE,
   type AgentModelContext,
+  type HostChildProcessOptions,
+  HostRequestError,
   INVALID_PARAMS,
   type JsonValue,
 } from "@ora-space/plugin-sdk";
@@ -10,6 +12,8 @@ import {
   ClaudeClient,
   type SpawnedProcess,
 } from "../src/services/claude-client.ts";
+import { bundledAdapterPath } from "../src/services/bundled-binary.ts";
+import { BIN_ENV_VAR } from "../src/services/command.ts";
 import { modelRoute } from "../src/services/model-route.ts";
 
 const TOKEN = "synthetic-temporary-token";
@@ -66,6 +70,7 @@ Deno.test("a frozen context becomes one pinned Messages route", () => {
       CLAUDE_CODE_SUBAGENT_MODEL: "team/claude",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_AUTOUPDATER: "1",
+      ORA_CLAUDE_BUNDLED_CLI_ONLY: "1",
     },
   });
 });
@@ -341,6 +346,58 @@ Deno.test("a local start passes every ACP frame through untouched", async () => 
   await client.writeAcp(frame);
   assertEquals(adapter.written, [frame]);
   await client.stop();
+});
+
+Deno.test("a platform route spawns only the bundled adapter, ignoring a pin and PATH", async () => {
+  const spawns: HostChildProcessOptions[] = [];
+  const client = new ClaudeClient();
+  client.attachProcesses({
+    spawn: (options) => {
+      spawns.push(options);
+      return Promise.reject(
+        new HostRequestError("package_command_missing", "not in this package"),
+      );
+    },
+  });
+  const previous = Deno.env.get(BIN_ENV_VAR);
+  Deno.env.set(BIN_ENV_VAR, "/usr/local/bin/claude-agent-acp");
+  try {
+    const error = await assertRejects(() =>
+      startClaude(client, {
+        cwd: "/workspace",
+        hostVersion: "1.0.0",
+        modelContext: context(),
+      })
+    );
+    // Not retried as a missing install: the package itself cannot serve a platform route.
+    assertEquals((error as { code?: number }).code, AGENT_UNUSABLE);
+  } finally {
+    if (previous === undefined) Deno.env.delete(BIN_ENV_VAR);
+    else Deno.env.set(BIN_ENV_VAR, previous);
+  }
+  assertEquals(spawns.length, 1);
+  assertEquals(spawns[0].packageCommand, bundledAdapterPath());
+  assertEquals(Object.hasOwn(spawns[0], "command"), false);
+  assertEquals(spawns[0].env?.ORA_CLAUDE_BUNDLED_CLI_ONLY, "1");
+});
+
+Deno.test("the compiled adapter honours no CLI pin or local install on a platform route", async () => {
+  // Read as text: this file is compiled by Bun into the adapter binary and never imported here.
+  const entry = await Deno.readTextFile(
+    new URL("../scripts/adapter-entry.mjs", import.meta.url),
+  );
+  const resolver = entry.slice(entry.indexOf("function resolveClaudeCli()"));
+  const bundledOnly = resolver.indexOf(
+    'process.env[BUNDLED_ONLY_ENV_VAR] === "1"',
+  );
+  assertEquals(entry.includes('"ORA_CLAUDE_BUNDLED_CLI_ONLY"'), true);
+  assertEquals(bundledOnly > 0, true);
+  // The bundled-only branch returns before the pin or the local search is ever read.
+  assertEquals(
+    bundledOnly < resolver.indexOf("process.env[BIN_ENV_VAR]"),
+    true,
+  );
+  assertEquals(bundledOnly < resolver.indexOf("findLocalClaude()"), true);
 });
 
 /** A client started on the platform route, with the route request already answered. */

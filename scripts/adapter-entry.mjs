@@ -20,6 +20,13 @@ import { ADAPTER_BINARY_NAME, CLAUDE_BINARY_NAME } from "./paths.generated.mjs";
 const BIN_ENV_VAR = "ORA_CLAUDE_BIN";
 
 /**
+ * Set by the plugin for a platform-model execution: only the bundled CLI may run, never a pin or
+ * a local install. The route the plugin applied was tested against this exact pair, and another
+ * CLI build could read provider settings differently.
+ */
+const BUNDLED_ONLY_ENV_VAR = "ORA_CLAUDE_BUNDLED_CLI_ONLY";
+
+/**
  * Resolves the Claude Code CLI this adapter should drive, preferring the one shipped beside it.
  *
  * The bundled CLI comes first because it is the build the adapter was published against: the
@@ -31,6 +38,20 @@ const BIN_ENV_VAR = "ORA_CLAUDE_BIN";
  * machine that has it.
  */
 function resolveClaudeCli() {
+  // `process.execPath` is this compiled binary's own absolute path, whatever the working
+  // directory is, which is the only way to find the package this binary was installed into: a
+  // plugin is told no host path, and the package-relative paths the host understands are not
+  // resolvable from inside a process it spawned.
+  const bundled = join(dirname(process.execPath), CLAUDE_BINARY_NAME);
+  if (process.env[BUNDLED_ONLY_ENV_VAR] === "1") {
+    if (!isExecutableFile(bundled) || isUnrunnableHere(bundled)) {
+      throw new Error(
+        `${BUNDLED_ONLY_ENV_VAR} requires the bundled Claude Code CLI at ${bundled}, which cannot run here`,
+      );
+    }
+    return { path: bundled, source: "bundled" };
+  }
+
   const pinned = process.env[BIN_ENV_VAR]?.trim();
   if (pinned) {
     if (!isExecutableFile(pinned)) {
@@ -41,11 +62,6 @@ function resolveClaudeCli() {
     return { path: pinned, source: "pinned" };
   }
 
-  // `process.execPath` is this compiled binary's own absolute path, whatever the working
-  // directory is, which is the only way to find the package this binary was installed into: a
-  // plugin is told no host path, and the package-relative paths the host understands are not
-  // resolvable from inside a process it spawned.
-  const bundled = join(dirname(process.execPath), CLAUDE_BINARY_NAME);
   if (isExecutableFile(bundled) && !isUnrunnableHere(bundled)) {
     return { path: bundled, source: "bundled" };
   }

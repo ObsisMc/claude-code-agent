@@ -4,7 +4,7 @@ import {
   type JsonValue,
   PluginMethodError,
 } from "@ora-space/plugin-sdk";
-import { spawnClaude } from "./command.ts";
+import { spawnBundledClaude, spawnClaude } from "./command.ts";
 import { logger } from "./log.ts";
 import { ModelGuard } from "./model-guard.ts";
 import type { ModelRoute } from "./model-route.ts";
@@ -390,7 +390,10 @@ export class ClaudeClient {
         "ClaudeClient cannot spawn before attachProcesses() runs",
       );
     }
-    const child = await spawnClaude(this.#processes, { cwd, env });
+    // A platform route runs only the pair this package ships; see `spawnBundledClaude`.
+    const child = this.#route === undefined
+      ? await spawnClaude(this.#processes, { cwd, env })
+      : await spawnBundledClaude(this.#processes, { cwd, env });
     return {
       stdin: new WritableStream<Uint8Array>({
         write: (chunk) => child.write(chunk),

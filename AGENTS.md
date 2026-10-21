@@ -375,6 +375,12 @@ bridge right after spawn and **before** `agent/start` returns:
   serves only the frozen model id.
 - `ClaudeClient.useRoute` keeps the route for every later start, so an Effect
   `reactivate` restart reapplies it before the adapter counts as running.
+- Only the pair this package ships runs on a route. `spawnBundledClaude` asks
+  the host for the bundled adapter alone — no `ORA_CLAUDE_ACP_BIN`, no PATH —
+  and fails as `AGENT_UNUSABLE` when the package cannot run it;
+  `ORA_CLAUDE_BUNDLED_CLI_ONLY=1` in the route environment makes
+  `scripts/adapter-entry.mjs` refuse `ORA_CLAUDE_BIN` and a local install the
+  same way.
 
 This is the second narrow exception to "ACP payloads are never parsed": the
 bridge writes one request of its own (`id` prefixed `ora-claude-model-route-`)
