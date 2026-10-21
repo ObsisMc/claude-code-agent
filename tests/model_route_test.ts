@@ -29,7 +29,8 @@ function context(
     configuration: {
       pluginId: "official/ora-space.claude",
       pluginVersion: "0.4.0",
-      target: "x86_64-unknown-linux-gnu",
+      // Whatever runs the tests is the target the Node froze this configuration for.
+      target: Deno.build.target,
       packageSha256: "a".repeat(64),
       schemaVersion: 2,
       declarationFingerprint: "b".repeat(64),
@@ -71,6 +72,7 @@ Deno.test("a frozen context becomes one pinned Messages route", () => {
       ANTHROPIC_DEFAULT_SONNET_MODEL: "team/claude",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "team/claude",
       CLAUDE_CODE_SUBAGENT_MODEL: "team/claude",
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_AUTOUPDATER: "1",
       ORA_CLAUDE_BUNDLED_CLI_ONLY: "1",
@@ -92,6 +94,29 @@ Deno.test("configurations this release cannot apply are refused without echoing 
         settingsJson: '{"model":"opus"}',
       },
     }),
+    context({
+      configuration: {
+        ...context().configuration,
+        pluginId: "official/ora-space.opencode",
+      },
+    }),
+    context({
+      configuration: {
+        ...context().configuration,
+        target: Deno.build.target === "x86_64-unknown-linux-gnu"
+          ? "aarch64-unknown-linux-gnu"
+          : "x86_64-unknown-linux-gnu",
+      },
+    }),
+    context({
+      configuration: {
+        ...context().configuration,
+        model: { ...context().configuration.model, maxTokens: 0 },
+      },
+    }),
+    // A header value cannot carry these; the adapter would only fail later, retryably.
+    context({ token: `${TOKEN}\r\nx-other: 1` }),
+    context({ token: `${TOKEN}\u0000` }),
     context({ proxyBaseUrl: "http://gateway.internal/runtime/anthropic/v1" }),
     context({ proxyBaseUrl: "https://gateway.internal/runtime/anthropic" }),
     context({ proxyBaseUrl: "https://gateway.internal/v1?redirect=1" }),

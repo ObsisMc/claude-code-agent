@@ -23,9 +23,7 @@ import {
 } from "./handlers/models.ts";
 import { ClaudeClient } from "./services/claude-client.ts";
 import { logger } from "./services/log.ts";
-
-/** Must match `ora.id` in package.json, which is also this agent's identity inside Ora. */
-const PLUGIN_ID = "ora-space.claude";
+import { PLUGIN_ID } from "./services/model-route.ts";
 
 /**
  * Publishes Claude Code as an Ora agent.
