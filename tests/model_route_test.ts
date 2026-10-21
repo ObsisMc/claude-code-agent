@@ -534,43 +534,79 @@ Deno.test("adapter errors reach Ora with their code but without their text", asy
   await client.stop();
 });
 
-Deno.test("the token and gateway address never leave the adapter's output", async () => {
+Deno.test("the token and gateway address never leave the adapter's frames", async () => {
+  const { adapter, client, forwarded } = await platformClient();
+  adapter.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId: "s1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text:
+            `API Error calling https://gateway.internal:8443/runtime/anthropic/v1/messages with ${TOKEN}; gateway.internal unreachable`,
+        },
+      },
+    },
+  });
+  await waitFor(() => forwarded.length === 1);
+  assertEquals(
+    (forwarded[0] as {
+      params: { update: { content: { text: string } } };
+    }).params.update.content.text,
+    "API Error calling [redacted]/v1/messages with [redacted]; [redacted] unreachable",
+  );
+  await client.stop();
+});
+
+Deno.test("the adapter's own text never reaches the log on a platform route", async () => {
   const records: string[] = [];
   installLogger(createLogger({ write: (line) => records.push(line) }));
   try {
-    const { adapter, client, forwarded } = await platformClient();
-    adapter.emit({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: {
-        sessionId: "s1",
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text:
-              `API Error calling https://gateway.internal:8443/runtime/anthropic/v1/messages with ${TOKEN}; gateway.internal unreachable`,
-          },
-        },
-      },
-    });
-    adapter.emitLine(`not json ${TOKEN} gateway.internal:8443`);
+    const { adapter, client } = await platformClient();
+    // What a failed request looks like once the CLI and adapter have echoed it: the upstream's
+    // body and address, and paths of the host this runs on.
+    const leaks = [
+      'upstream host=api.provider.example path=/v1/messages body={"error":"overloaded","request_id":"req_123"}',
+      "/home/node-user/.cache/ora/workspaces/7f3a",
+    ];
+    adapter.emitLine(`not json ${leaks.join(" ")}`);
     adapter.emitStderr(
-      `[providers/set] apiType=anthropic baseUrl=https://gateway.internal:8443/runtime/anthropic key=${TOKEN}`,
+      "[providers/set] apiType=anthropic baseUrl=https://gateway.internal:8443/runtime/anthropic",
     );
+    adapter.emitStderr(`API Error: 503 ${leaks.join(" ")} ${TOKEN}`);
+    adapter.closeStderr();
     await waitFor(() =>
-      forwarded.length === 1 &&
-      records.some((record) => record.includes("providers/set")) &&
-      records.some((record) => record.includes("non-JSON"))
+      records.some((record) => record.includes("non-JSON")) &&
+      records.some((record) => record.includes("suppressed"))
     );
-    const text = JSON.stringify(forwarded) + records.join("\n");
-    assertEquals(text.includes(TOKEN), false);
-    assertEquals(text.includes("gateway.internal"), false);
-    assertEquals(
-      (forwarded[0] as {
-        params: { update: { content: { text: string } } };
-      }).params.update.content.text,
-      "API Error calling [redacted]/v1/messages with [redacted]; [redacted] unreachable",
+    const text = records.join("\n");
+    for (const secret of [TOKEN, "gateway.internal", ...leaks]) {
+      assertEquals(text.includes(secret), false, secret);
+    }
+    assertEquals(text.includes('"lines":2'), true);
+    await client.stop();
+  } finally {
+    installLogger(createLogger(createStderrLogSink()));
+  }
+});
+
+Deno.test("a local adapter's diagnostics are kept verbatim", async () => {
+  const records: string[] = [];
+  installLogger(createLogger({ write: (line) => records.push(line) }));
+  try {
+    const adapter = new ScriptedAdapter("accept");
+    const client = new ClaudeClient({
+      spawn: (_cwd, env) => adapter.spawn(env),
+    });
+    await client.start("/workspace");
+    adapter.emitStderr("[claude-agent-acp] using the local CLI");
+    adapter.emitLine("not json from a local pairing");
+    await waitFor(() =>
+      records.some((record) => record.includes("using the local CLI")) &&
+      records.some((record) => record.includes("from a local pairing"))
     );
     await client.stop();
   } finally {
@@ -578,7 +614,25 @@ Deno.test("the token and gateway address never leave the adapter's output", asyn
   }
 });
 
-/** A client started on the platform route, with the route request already answered. */
+Deno.test("a route the adapter could not prepare fails the start as retryable", async () => {
+  const adapter = new ScriptedAdapter("fail");
+  const client = new ClaudeClient({
+    spawn: (_cwd, env) => adapter.spawn(env),
+  });
+  const error = await assertRejects(() =>
+    startClaude(client, {
+      cwd: "/workspace",
+      hostVersion: "1.0.0",
+      modelContext: context(),
+    })
+  );
+  // Not AGENT_UNUSABLE: a gateway that failed to list its models may answer the next start.
+  assertEquals((error as { code?: number }).code, -32603);
+  assertEquals(String((error as Error).message).includes("503"), false);
+  assertEquals(client.running, false);
+  assertEquals(adapter.killed, 1);
+});
+
 async function platformClient() {
   const adapter = new ScriptedAdapter("accept");
   const forwarded: JsonValue[] = [];
@@ -606,7 +660,19 @@ class ScriptedAdapter {
   #stdout: ReadableStreamDefaultController<Uint8Array> | undefined;
   #stderr: ReadableStreamDefaultController<Uint8Array> | undefined;
 
-  constructor(readonly answer: "accept" | "reject") {}
+  /** The `providers/set` request a `hold` adapter has not answered yet. */
+  #heldRoute: string | undefined;
+
+  /**
+   * `accept` and `reject` answer the route at once; `fail` answers it the way the pinned adapter
+   * reports a gateway model listing that failed; `hold` leaves it to {@link acceptRoute}.
+   */
+  constructor(readonly answer: "accept" | "reject" | "fail" | "hold") {}
+
+  /** Accepts the route a `hold` adapter is sitting on. */
+  acceptRoute(): void {
+    this.emit({ jsonrpc: "2.0", id: this.#heldRoute ?? null, result: {} });
+  }
 
   /** Spawns one generation; a later spawn supersedes the earlier one's stdout. */
   spawn(env: Record<string, string>): SpawnedProcess {
@@ -621,15 +687,7 @@ class ScriptedAdapter {
             const frame = JSON.parse(line) as { id?: string; method?: string };
             this.written.push(frame as JsonValue);
             if (frame.method === "providers/set") {
-              this.emit(
-                this.answer === "accept"
-                  ? { jsonrpc: "2.0", id: frame.id ?? null, result: {} }
-                  : {
-                    jsonrpc: "2.0",
-                    id: frame.id ?? null,
-                    error: { code: -32602, message: `rejected ${TOKEN}` },
-                  },
-              );
+              this.#answerRoute(frame.id ?? null);
             }
           }
         },
@@ -654,6 +712,40 @@ class ScriptedAdapter {
         ended?.();
       },
     };
+  }
+
+  #answerRoute(id: string | null): void {
+    switch (this.answer) {
+      case "accept":
+        this.emit({ jsonrpc: "2.0", id, result: {} });
+        return;
+      case "reject":
+        this.emit({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: `rejected ${TOKEN}` },
+        });
+        return;
+      case "fail":
+        this.emit({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32603,
+            message:
+              'Model discovery for provider "main" failed: Model listing GET /runtime/anthropic/v1/models 503',
+          },
+        });
+        return;
+      case "hold":
+        this.#heldRoute = id ?? undefined;
+        return;
+    }
+  }
+
+  /** Closes the current generation's stderr, as an adapter that exits does. */
+  closeStderr(): void {
+    this.#stderr?.close();
   }
 
   /** Writes one diagnostic line to the current generation's stderr. */

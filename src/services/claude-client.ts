@@ -17,6 +17,20 @@ const adapterLog = logger("claude-agent-acp");
 /** How long the adapter may take to accept a platform route before `agent/start` fails. */
 const ROUTE_TIMEOUT_MS = 10_000;
 
+/**
+ * JSON-RPC codes with which the adapter refuses the route itself: the request was malformed for
+ * it, or this adapter has no `providers/set` at all. Either is a property of this package and the
+ * configuration it was handed, so retrying the same start cannot succeed.
+ */
+const ROUTE_REFUSED_CODES = new Set([-32601, -32602]);
+
+/**
+ * What a route that could not be prepared is reported as: the adapter answers a gateway listing
+ * that failed (a 503, a timeout) with an internal error, and that or a silent adapter can pass on
+ * the next attempt. Ora retries any start failure that is neither of the two agent codes.
+ */
+const ROUTE_NOT_PREPARED = -32603;
+
 /** Prefix of the request ids this bridge sends on its own; Ora's ids are numbers or its own text. */
 const ROUTE_REQUEST_PREFIX = "ora-claude-model-route-";
 
@@ -146,8 +160,8 @@ export class ClaudeClient {
       throw error;
     }
     this.#running = { process, stdinWriter: process.stdin.getWriter() };
-    this.#attach(process);
     const route = this.#route;
+    this.#attach(process, route === undefined ? "verbatim" : "sensitive");
     if (route !== undefined) {
       try {
         await this.#applyRoute(route);
@@ -167,6 +181,10 @@ export class ClaudeClient {
    * The request goes straight into the adapter's stdin with an id of this bridge's own, and its
    * answer is consumed by `#pumpStdout` before anything is forwarded, so Ora never sees either
    * frame. Neither the params nor an error payload is logged: the header carries the token.
+   *
+   * A refusal is classified by its code alone (ADR D2 keeps an incompatible configuration apart
+   * from a failed preparation): the adapter refusing the request is final, while a gateway listing
+   * that failed or an adapter that never answered may pass on the next start.
    */
   async #applyRoute(route: ModelRoute): Promise<void> {
     const id = `${ROUTE_REQUEST_PREFIX}${++this.#nextRequest}`;
@@ -190,18 +208,27 @@ export class ClaudeClient {
         },
       });
       const answer = await Promise.race([answered, timedOut]);
-      const accepted = answer !== undefined && typeof answer === "object" &&
+      if (
+        answer !== undefined && typeof answer === "object" &&
         answer !== null && !Array.isArray(answer) && "result" in answer &&
-        !("error" in answer);
-      if (!accepted) {
-        log.warn("the adapter did not accept the platform model route", {
-          context: { timedOut: answer === undefined },
-        });
-        throw new PluginMethodError(
-          AGENT_UNUSABLE,
-          "the Claude ACP adapter did not accept the platform model route",
-        );
+        !("error" in answer)
+      ) {
+        return;
       }
+      const code = errorCode(answer);
+      const refused = code !== undefined && ROUTE_REFUSED_CODES.has(code);
+      log.warn("the adapter did not accept the platform model route", {
+        context: { timedOut: answer === undefined, code, refused },
+      });
+      throw refused
+        ? new PluginMethodError(
+          AGENT_UNUSABLE,
+          "the Claude ACP adapter refused the platform model route",
+        )
+        : new PluginMethodError(
+          ROUTE_NOT_PREPARED,
+          "the Claude ACP adapter could not prepare the platform model route",
+        );
     } finally {
       clearTimeout(timer);
       this.#pending.delete(id);
@@ -281,10 +308,15 @@ export class ClaudeClient {
     }
   }
 
-  /** Wires stdout, stderr, and exit bookkeeping for one live child. */
-  #attach(process: SpawnedProcess): void {
-    void this.#pumpStdout(process);
-    void this.#pumpStderr(process);
+  /**
+   * Wires stdout, stderr, and exit bookkeeping for one live child.
+   *
+   * `output` is fixed per generation: on a platform route the adapter's own text can carry the
+   * gateway's answer, a provider error body or a host path, none of which may reach the log.
+   */
+  #attach(process: SpawnedProcess, output: AdapterOutput): void {
+    void this.#pumpStdout(process, output);
+    void this.#pumpStderr(process, output);
     void process.exited.then(() => {
       // A process that is no longer `#running` was already superseded by a later `start()` (an
       // Effect restart, for instance); its death is old news, not a live agent going away, so it
@@ -317,19 +349,25 @@ export class ClaudeClient {
    * rejects non-object frames anyway, and one stray diagnostic line must not end every live session
    * on this agent.
    */
-  async #pumpStdout(process: SpawnedProcess): Promise<void> {
+  async #pumpStdout(
+    process: SpawnedProcess,
+    output: AdapterOutput,
+  ): Promise<void> {
     try {
       for await (const raw of decodeLines(process.stdout)) {
-        // Scrubbed before anything reads it, so neither Ora nor the log below sees a secret.
+        // Scrubbed before anything reads it, so a secret inside a frame never reaches Ora.
         const line = this.#guard?.scrub(raw) ?? raw;
         let frame: JsonValue;
         try {
           frame = JSON.parse(line) as JsonValue;
         } catch {
-          // The line itself is logged: it is the adapter's own output on its protocol channel,
-          // and the only clue to what went wrong with the pairing.
+          // Locally the line itself is logged: it is the adapter's own output on its protocol
+          // channel, and the only clue to what went wrong with the pairing. On a platform route
+          // it is the one thing that is not a frame, so nothing vouches for what it quotes.
           log.warn("dropping a non-JSON stdout line from the adapter", {
-            context: { pid: process.pid, line: line.slice(0, 512) },
+            context: output === "verbatim"
+              ? { pid: process.pid, line: line.slice(0, 512) }
+              : { pid: process.pid, length: line.length },
           });
           continue;
         }
@@ -370,16 +408,30 @@ export class ClaudeClient {
    * The adapter is a third party whose stderr severity this plugin cannot know, so every line is
    * recorded at `info` under its own target rather than guessed at; the host's per-plugin level
    * decides whether it is kept.
+   *
+   * On a platform route no line is recorded, only how many there were (ADR D2: raw provider and
+   * CLI errors are not shown). The adapter logs the gateway it routes to, and Claude Code echoes a
+   * failed request with the gateway's response body; scrubbing known secrets out of that text
+   * would still keep the body, the upstream path and the host's own paths.
    */
-  async #pumpStderr(process: SpawnedProcess): Promise<void> {
+  async #pumpStderr(
+    process: SpawnedProcess,
+    output: AdapterOutput,
+  ): Promise<void> {
+    let suppressed = 0;
     try {
       for await (const line of decodeLines(process.stderr)) {
-        if (line.length > 0) {
-          // The adapter logs the gateway it routes to, and the CLI may echo a failed request.
-          adapterLog.info(this.#guard?.scrub(line) ?? line, {
-            context: { pid: process.pid },
-          });
+        if (line.length === 0) continue;
+        if (output === "sensitive") {
+          suppressed += 1;
+          continue;
         }
+        adapterLog.info(line, { context: { pid: process.pid } });
+      }
+      if (suppressed > 0) {
+        log.info("suppressed the adapter's stderr on a platform route", {
+          context: { pid: process.pid, lines: suppressed },
+        });
       }
     } catch (error) {
       log.warn("claude-agent-acp stderr read failed", {
@@ -434,6 +486,29 @@ function routeSecrets(route: ModelRoute): string[] {
     gateway.host,
     gateway.hostname,
   ];
+}
+
+/**
+ * How much of the adapter's own text this plugin may keep: all of it on a local host, none of it
+ * on a platform route.
+ */
+type AdapterOutput = "verbatim" | "sensitive";
+
+/** The JSON-RPC error code of one answer, if it is an error with an integer code. */
+function errorCode(answer: JsonValue | undefined): number | undefined {
+  if (
+    answer === undefined || answer === null || typeof answer !== "object" ||
+    Array.isArray(answer)
+  ) {
+    return undefined;
+  }
+  const error = answer.error;
+  if (error === null || typeof error !== "object" || Array.isArray(error)) {
+    return undefined;
+  }
+  return typeof error.code === "number" && Number.isInteger(error.code)
+    ? error.code
+    : undefined;
 }
 
 /** The envelope fields of one frame that are safe to log: never its params or result. */

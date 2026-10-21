@@ -94,7 +94,7 @@ export class ModelGuard {
       .sort((a, b) => b.length - a.length);
   }
 
-  /** Replaces every secret in one line of adapter output before it is parsed, sent or logged. */
+  /** Replaces every secret in one line of adapter output before it is parsed or sent. */
   scrub(text: string): string {
     let scrubbed = text;
     for (const secret of this.#secrets) {
