@@ -1,6 +1,6 @@
 name: CI
 
-# Runs the repository's own tasks rather than spelling out commands. None of them needs the Claude
+# Runs the repository's own tasks rather than spelling out commands. Only `argv` needs the Claude
 # CLI; type checking also catches an @ora-space/plugin-sdk version that is not published yet.
 
 on:
@@ -32,3 +32,30 @@ jobs:
 
       - name: Test
         run: deno task test
+
+  # Runs the adapter and CLI pair `upstream.lock.json` pins on a platform route and fails if either
+  # puts the route's token on a command line. A new pin is checked here before it ships.
+  argv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install the pinned adapter and CLI
+        run: |
+          adapter="$(jq -r '"\(.adapter.name)@\(.adapter.version)"' upstream.lock.json)"
+          sdk="$(jq -r '"\(.agentSdk.name)@\(.agentSdk.version)"' upstream.lock.json)"
+          npm install --prefix "$RUNNER_TEMP/pair" --ignore-scripts --no-audit --no-fund "$adapter" "$sdk"
+          test -f "$RUNNER_TEMP/pair/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+          test -x "$RUNNER_TEMP/pair/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
+
+      - name: Command lines carry no token
+        run: deno task test:argv
+        env:
+          ORA_CLAUDE_ARGV_ADAPTER: ${{ runner.temp }}/pair/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+          ORA_CLAUDE_ARGV_CLI: ${{ runner.temp }}/pair/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude
