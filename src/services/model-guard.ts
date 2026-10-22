@@ -6,6 +6,12 @@ export interface FrozenModel {
   readonly name: string;
 }
 
+/**
+ * The flag settings every session of a platform-model execution starts with: the route without
+ * its token. The CLI receives them on its command line, so nothing secret may ever be in here.
+ */
+export type SessionSettings = { readonly [key: string]: JsonValue };
+
 /** What the bridge does with one frame Ora sent towards the adapter. */
 export type InboundDecision =
   /** Write this frame, possibly rewritten, into the adapter. */
@@ -28,10 +34,11 @@ const REDACTED = "[redacted]";
 /**
  * Methods that would hand the adapter another upstream, another credential, or none at all.
  *
- * `providers/set` would replace the route this plugin applied, while `providers/disable` and
- * `logout` clear it and send Claude Code back to its native routing and login. `authenticate`
- * installs a gateway of the caller's choosing. `providers/list` is read-only, but nothing Ora
- * needs is in it, and the route is this plugin's business alone.
+ * `providers/set` would install a route of the caller's choosing over the one this plugin
+ * applied, while `providers/disable` and `logout` reset the adapter's routing and send Claude Code
+ * back to its own login. `authenticate` installs a gateway of the caller's choosing.
+ * `providers/list` is read-only, but nothing Ora needs is in it, and the route is this plugin's
+ * business alone.
  */
 function isRouteMutation(method: string): boolean {
   return method === "authenticate" || method === "logout" ||
@@ -45,7 +52,8 @@ function isRouteMutation(method: string): boolean {
  *
  * `claude-agent-acp` spreads the caller's options over its own and the caller's `env` over the
  * process environment, so a `model`, an `ANTHROPIC_MODEL` or a `--model` in `extraArgs` would
- * outrank the aliases this plugin pins. Every other option is left alone.
+ * outrank the aliases this plugin pins, and the caller's `settings` would replace the route's.
+ * Every other option is left alone.
  */
 const PINNED_SESSION_OPTIONS = [
   "model",
@@ -69,11 +77,12 @@ const SESSION_SETUP = new Set([
 /**
  * Keeps one platform-model execution on its frozen route and model.
  *
- * The route itself is applied once, through `providers/set`; this class only keeps anyone else
+ * The route is in the adapter's spawn environment; this class gives every session the route's
+ * flag settings, which keep a repository's settings from overriding it, and keeps anyone else
  * from undoing it over ACP. It refuses the methods that could move the adapter to another
- * upstream or model, strips session options that would do the same, narrows every model selector
- * the adapter reports to the frozen model, and remembers each session's config options so
- * re-selecting the frozen model can be answered without reaching the adapter.
+ * upstream or model, replaces session options that would do the same, narrows every model
+ * selector the adapter reports to the frozen model, and remembers each session's config options
+ * so re-selecting the frozen model can be answered without reaching the adapter.
  *
  * It also keeps the route's secrets in the adapter: adapter error text is replaced, and the token
  * and gateway address are scrubbed from every line the adapter prints before it is forwarded or
@@ -81,6 +90,7 @@ const SESSION_SETUP = new Set([
  */
 export class ModelGuard {
   readonly #model: FrozenModel;
+  readonly #settings: SessionSettings;
   /** Longest first, so a URL is replaced whole before the host inside it is. */
   readonly #secrets: readonly string[];
   /** Ora's outstanding requests whose answer belongs to a session the request named. */
@@ -88,8 +98,13 @@ export class ModelGuard {
   /** The config options each session last reported, to answer a no-op model change. */
   readonly #configOptions = new Map<string, JsonValue[]>();
 
-  constructor(model: FrozenModel, secrets: readonly string[] = []) {
+  constructor(
+    model: FrozenModel,
+    settings: SessionSettings,
+    secrets: readonly string[] = [],
+  ) {
     this.#model = model;
+    this.#settings = settings;
     this.#secrets = [...new Set(secrets.filter((secret) => secret !== ""))]
       .sort((a, b) => b.length - a.length);
   }
@@ -146,7 +161,7 @@ export class ModelGuard {
       this.#pendingSessions.set(idKey(frame.id), sessionId);
     }
     if (SESSION_SETUP.has(method)) {
-      return { forward: pinSessionOptions(frame, params) };
+      return { forward: pinSessionOptions(frame, params, this.#settings) };
     }
     return { forward: frame };
   }
@@ -243,23 +258,29 @@ export class ModelGuard {
   }
 }
 
-/** Drops the caller's model, CLI and environment choices from one session-setup request. */
+/**
+ * Drops the caller's model, CLI and environment choices from one session-setup request and gives
+ * it the route's settings.
+ *
+ * The settings are set on every such request, whether or not the caller sent any options: the
+ * pinned adapter builds each session's CLI from that request's options alone, and a session
+ * started without them would let a repository's settings choose its upstream.
+ */
 function pinSessionOptions(
   frame: { [key: string]: JsonValue },
   params: { [key: string]: JsonValue },
+  settings: SessionSettings,
 ): JsonValue {
-  const meta = params._meta;
-  if (!isObject(meta) || !isObject(meta.claudeCode)) return frame;
-  const options = meta.claudeCode.options;
-  if (!isObject(options)) return frame;
-  if (!PINNED_SESSION_OPTIONS.some((key) => key in options)) return frame;
-  const pinned = { ...options };
+  const meta = isObject(params._meta) ? params._meta : {};
+  const claudeCode = isObject(meta.claudeCode) ? meta.claudeCode : {};
+  const pinned = isObject(claudeCode.options) ? { ...claudeCode.options } : {};
   for (const key of PINNED_SESSION_OPTIONS) delete pinned[key];
+  pinned.settings = settings;
   return {
     ...frame,
     params: {
       ...params,
-      _meta: { ...meta, claudeCode: { ...meta.claudeCode, options: pinned } },
+      _meta: { ...meta, claudeCode: { ...claudeCode, options: pinned } },
     },
   };
 }

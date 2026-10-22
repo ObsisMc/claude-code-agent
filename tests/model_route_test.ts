@@ -76,6 +76,24 @@ function context(
   };
 }
 
+/** The routing a route puts in both the spawn environment and the session settings. */
+const ROUTING = {
+  ANTHROPIC_BASE_URL: "https://gateway.internal:8443/runtime/anthropic",
+  ANTHROPIC_AUTH_TOKEN: "acp-proxy",
+  ANTHROPIC_API_KEY: "",
+  CLAUDE_CODE_OAUTH_TOKEN: "",
+  ANTHROPIC_BEDROCK_BASE_URL: "",
+  ANTHROPIC_VERTEX_BASE_URL: "",
+  CLAUDE_CODE_USE_BEDROCK: "0",
+  CLAUDE_CODE_USE_VERTEX: "0",
+  ANTHROPIC_VERTEX_PROJECT_ID: "",
+  CLOUD_ML_REGION: "",
+  AWS_REGION: "",
+};
+
+/** The flag settings every session of a platform route starts with. */
+const SESSION_SETTINGS = { apiKeyHelper: "", env: ROUTING };
+
 Deno.test("a frozen context becomes one pinned Messages route", () => {
   assertEquals(modelRoute(context()), {
     applied: {
@@ -84,13 +102,11 @@ Deno.test("a frozen context becomes one pinned Messages route", () => {
       configurationRevision: 7,
     },
     model: { id: "team/claude", name: "Team Claude" },
-    provider: {
-      providerId: "main",
-      apiType: "anthropic",
-      baseUrl: "https://gateway.internal:8443/runtime/anthropic",
-      headers: { "x-api-key": TOKEN },
-    },
+    baseUrl: "https://gateway.internal:8443/runtime/anthropic",
+    token: TOKEN,
     environment: {
+      ...ROUTING,
+      ANTHROPIC_CUSTOM_HEADERS: `x-api-key: ${TOKEN}`,
       ANTHROPIC_MODEL: "team/claude",
       ANTHROPIC_SMALL_FAST_MODEL: "team/claude",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "team/claude",
@@ -102,7 +118,19 @@ Deno.test("a frozen context becomes one pinned Messages route", () => {
       DISABLE_AUTOUPDATER: "1",
       ORA_CLAUDE_BUNDLED_CLI_ONLY: "1",
     },
+    settings: SESSION_SETTINGS,
   });
+});
+
+Deno.test("the token is in the spawn environment and never in the session settings", () => {
+  const route = modelRoute(context());
+  const carriers = Object.entries(route.environment)
+    .filter(([, value]) => value.includes(TOKEN))
+    .map(([name]) => name);
+  assertEquals(carriers, ["ANTHROPIC_CUSTOM_HEADERS"]);
+  // The CLI receives these settings as a `--settings` argument, which anyone listing processes
+  // can read.
+  assertEquals(JSON.stringify(route.settings).includes(TOKEN), false);
 });
 
 Deno.test("configurations this release cannot apply are refused without echoing the token", () => {
@@ -158,8 +186,8 @@ Deno.test("configurations this release cannot apply are refused without echoing 
   }
 });
 
-Deno.test("a platform start is confirmed only after the adapter accepted its route", async () => {
-  const adapter = new ScriptedAdapter("accept");
+Deno.test("a platform start spawns the adapter on its route and sends it nothing", async () => {
+  const adapter = new ScriptedAdapter();
   const forwarded: JsonValue[] = [];
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),
@@ -172,33 +200,18 @@ Deno.test("a platform start is confirmed only after the adapter accepted its rou
   });
   assertEquals(applied, modelRoute(context()).applied);
   assertEquals(adapter.environments, [modelRoute(context()).environment]);
-  // The token reaches the adapter only inside its own provider request, never its environment.
-  assertEquals(
-    Object.values(adapter.environments[0]).some((value) =>
-      value.includes(TOKEN)
-    ),
-    false,
-  );
-  assertEquals(adapter.written, [{
-    jsonrpc: "2.0",
-    id: "ora-claude-model-route-1",
-    method: "providers/set",
-    params: {
-      providerId: "main",
-      apiType: "anthropic",
-      baseUrl: "https://gateway.internal:8443/runtime/anthropic",
-      headers: { "x-api-key": TOKEN },
-    },
-  }]);
-  // The adapter's answer belongs to this bridge; Ora's frames still pass through untouched.
+  assertEquals([client.running, client.ready], [true, true]);
+  // No request of this bridge's own carries the token, or anything else, into the adapter.
+  assertEquals(adapter.written, []);
   adapter.emit({ jsonrpc: "2.0", id: 1, result: {} });
   await waitFor(() => forwarded.length === 1);
   assertEquals(forwarded, [{ jsonrpc: "2.0", id: 1, result: {} }]);
   await client.stop();
+  assertEquals(client.ready, false);
 });
 
-Deno.test("an Effect restart reapplies the same route before the adapter counts as running", async () => {
-  const adapter = new ScriptedAdapter("accept");
+Deno.test("an Effect restart spawns the adapter on the same route", async () => {
+  const adapter = new ScriptedAdapter();
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),
   });
@@ -208,34 +221,16 @@ Deno.test("an Effect restart reapplies the same route before the adapter counts 
     modelContext: context(),
   });
   await client.start("/workspace");
-  assertEquals(
-    adapter.written.map((frame) => (frame as { id: string }).id),
-    ["ora-claude-model-route-1", "ora-claude-model-route-2"],
-  );
-  assertEquals(adapter.environments.length, 2);
+  assertEquals(adapter.environments, [
+    modelRoute(context()).environment,
+    modelRoute(context()).environment,
+  ]);
+  assertEquals(client.ready, true);
   await client.stop();
 });
 
-Deno.test("a rejected route fails the start and stops the adapter", async () => {
-  const adapter = new ScriptedAdapter("reject");
-  const client = new ClaudeClient({
-    spawn: (_cwd, env) => adapter.spawn(env),
-  });
-  const error = await assertRejects(() =>
-    startClaude(client, {
-      cwd: "/workspace",
-      hostVersion: "1.0.0",
-      modelContext: context(),
-    })
-  );
-  assertEquals((error as { code?: number }).code, AGENT_UNUSABLE);
-  assertEquals(String((error as Error).message).includes(TOKEN), false);
-  assertEquals(client.running, false);
-  assertEquals(adapter.killed, 1);
-});
-
 Deno.test("a local start keeps the adapter's own routing and confirms nothing", async () => {
-  const adapter = new ScriptedAdapter("accept");
+  const adapter = new ScriptedAdapter();
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),
   });
@@ -271,7 +266,7 @@ Deno.test("a client cannot replace, drop or re-authenticate the platform route",
   }
   // A notification has nobody to answer and is simply not delivered.
   await client.writeAcp({ jsonrpc: "2.0", method: "providers/disable" });
-  assertEquals(adapter.written.length, 1);
+  assertEquals(adapter.written.length, 0);
   assertEquals(
     forwarded.map((frame) => (frame as { id: number }).id),
     [11, 12, 13, 14, 15, 16, 17],
@@ -327,7 +322,7 @@ Deno.test("a client can only ever select the frozen model", async () => {
   });
   assertEquals(
     adapter.written.map((frame) => (frame as { id: string | number }).id),
-    ["ora-claude-model-route-1", 4, 6],
+    [4, 6],
   );
   assertEquals(forwarded[0], {
     jsonrpc: "2.0",
@@ -377,21 +372,63 @@ Deno.test("session options cannot choose another model, CLI or environment", asy
       },
     },
   });
-  assertEquals(adapter.written[1], {
+  assertEquals(adapter.written[0], {
     jsonrpc: "2.0",
     id: 1,
     method: "session/new",
     params: {
       cwd: "/workspace",
       mcpServers: [],
-      _meta: { claudeCode: { options: { maxTurns: 3 } }, other: true },
+      _meta: {
+        claudeCode: {
+          options: { maxTurns: 3, settings: SESSION_SETTINGS },
+        },
+        other: true,
+      },
     },
   });
   await client.stop();
 });
 
+Deno.test("every session setup carries the route's settings, with or without options", async () => {
+  const { adapter, client } = await platformClient();
+  const setups: [string, JsonValue][] = [
+    ["session/new", { cwd: "/workspace", mcpServers: [] }],
+    ["session/load", { sessionId: "s1", cwd: "/workspace", mcpServers: [] }],
+    ["session/resume", {
+      sessionId: "s1",
+      cwd: "/workspace",
+      _meta: { claudeCode: { options: { settings: "./elsewhere.json" } } },
+    }],
+    ["session/fork", {
+      sessionId: "s1",
+      cwd: "/workspace",
+      _meta: { claudeCode: { vertex: true } },
+    }],
+  ];
+  for (const [index, [method, params]] of setups.entries()) {
+    await client.writeAcp({ jsonrpc: "2.0", id: index, method, params });
+  }
+  assertEquals(adapter.written.length, setups.length);
+  for (const frame of adapter.written) {
+    const meta = (frame as {
+      params: { _meta: { claudeCode: { options: { settings: JsonValue } } } };
+    }).params._meta;
+    assertEquals(meta.claudeCode.options.settings, SESSION_SETTINGS);
+  }
+  // What the caller put beside the options is kept.
+  assertEquals(
+    (adapter.written[3] as {
+      params: { _meta: { claudeCode: { vertex: boolean } } };
+    }).params._meta.claudeCode.vertex,
+    true,
+  );
+  assertEquals(JSON.stringify(adapter.written).includes(TOKEN), false);
+  await client.stop();
+});
+
 Deno.test("a local start passes every ACP frame through untouched", async () => {
-  const adapter = new ScriptedAdapter("accept");
+  const adapter = new ScriptedAdapter();
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),
   });
@@ -668,7 +705,7 @@ Deno.test("a local adapter's diagnostics are kept verbatim", async () => {
   const records: string[] = [];
   installLogger(createLogger({ write: (line) => records.push(line) }));
   try {
-    const adapter = new ScriptedAdapter("accept");
+    const adapter = new ScriptedAdapter();
     const client = new ClaudeClient({
       spawn: (_cwd, env) => adapter.spawn(env),
     });
@@ -683,44 +720,6 @@ Deno.test("a local adapter's diagnostics are kept verbatim", async () => {
   } finally {
     installLogger(createLogger(createStderrLogSink()));
   }
-});
-
-Deno.test("a route the adapter could not prepare fails the start as retryable", async () => {
-  const adapter = new ScriptedAdapter("fail");
-  const client = new ClaudeClient({
-    spawn: (_cwd, env) => adapter.spawn(env),
-  });
-  const error = await assertRejects(() =>
-    startClaude(client, {
-      cwd: "/workspace",
-      hostVersion: "1.0.0",
-      modelContext: context(),
-    })
-  );
-  // Not AGENT_UNUSABLE: a gateway that failed to list its models may answer the next start.
-  assertEquals((error as { code?: number }).code, -32603);
-  assertEquals(String((error as Error).message).includes("503"), false);
-  assertEquals(client.running, false);
-  assertEquals(adapter.killed, 1);
-});
-
-Deno.test("an adapter waiting for its route is running but not ready", async () => {
-  const adapter = new ScriptedAdapter("hold");
-  const client = new ClaudeClient({
-    spawn: (_cwd, env) => adapter.spawn(env),
-  });
-  const started = startClaude(client, {
-    cwd: "/workspace",
-    hostVersion: "1.0.0",
-    modelContext: context(),
-  });
-  await waitFor(() => adapter.written.length === 1);
-  assertEquals([client.running, client.ready], [true, false]);
-  adapter.acceptRoute();
-  await started;
-  assertEquals([client.running, client.ready], [true, true]);
-  await client.stop();
-  assertEquals(client.ready, false);
 });
 
 /** A bundled CLI beside a fake adapter, a pinned one, and one on a fake PATH. */
@@ -739,7 +738,7 @@ async function cliLayout(root: string) {
 }
 
 async function platformClient() {
-  const adapter = new ScriptedAdapter("accept");
+  const adapter = new ScriptedAdapter();
   const forwarded: JsonValue[] = [];
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),
@@ -753,31 +752,13 @@ async function platformClient() {
   return { adapter, client, forwarded };
 }
 
-/**
- * A `claude-agent-acp` stand-in that answers `providers/set` and records what it was given.
- *
- * Only the provider request is answered; every other frame is recorded and left to the test.
- */
+/** A `claude-agent-acp` stand-in that records what it was given and answers nothing itself. */
 class ScriptedAdapter {
   readonly written: JsonValue[] = [];
   readonly environments: Record<string, string>[] = [];
   killed = 0;
   #stdout: ReadableStreamDefaultController<Uint8Array> | undefined;
   #stderr: ReadableStreamDefaultController<Uint8Array> | undefined;
-
-  /** The `providers/set` request a `hold` adapter has not answered yet. */
-  #heldRoute: string | undefined;
-
-  /**
-   * `accept` and `reject` answer the route at once; `fail` answers it the way the pinned adapter
-   * reports a gateway model listing that failed; `hold` leaves it to {@link acceptRoute}.
-   */
-  constructor(readonly answer: "accept" | "reject" | "fail" | "hold") {}
-
-  /** Accepts the route a `hold` adapter is sitting on. */
-  acceptRoute(): void {
-    this.emit({ jsonrpc: "2.0", id: this.#heldRoute ?? null, result: {} });
-  }
 
   /** Spawns one generation; a later spawn supersedes the earlier one's stdout. */
   spawn(env: Record<string, string>): SpawnedProcess {
@@ -789,11 +770,7 @@ class ScriptedAdapter {
         write: (chunk) => {
           for (const line of new TextDecoder().decode(chunk).split("\n")) {
             if (line.trim() === "") continue;
-            const frame = JSON.parse(line) as { id?: string; method?: string };
-            this.written.push(frame as JsonValue);
-            if (frame.method === "providers/set") {
-              this.#answerRoute(frame.id ?? null);
-            }
+            this.written.push(JSON.parse(line) as JsonValue);
           }
         },
       }),
@@ -817,35 +794,6 @@ class ScriptedAdapter {
         ended?.();
       },
     };
-  }
-
-  #answerRoute(id: string | null): void {
-    switch (this.answer) {
-      case "accept":
-        this.emit({ jsonrpc: "2.0", id, result: {} });
-        return;
-      case "reject":
-        this.emit({
-          jsonrpc: "2.0",
-          id,
-          error: { code: -32602, message: `rejected ${TOKEN}` },
-        });
-        return;
-      case "fail":
-        this.emit({
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: -32603,
-            message:
-              'Model discovery for provider "main" failed: Model listing GET /runtime/anthropic/v1/models 503',
-          },
-        });
-        return;
-      case "hold":
-        this.#heldRoute = id ?? undefined;
-        return;
-    }
   }
 
   /** Closes the current generation's stderr, as an adapter that exits does. */
