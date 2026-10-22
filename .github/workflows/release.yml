@@ -70,13 +70,13 @@ jobs:
       # Writes dist/packages/*.orax (one per target in bundle.config.ts) and dist/manifest.toml,
       # reproducing exactly what upstream.lock.json records and verifying every download against it.
       # With `--agent-configuration` every package carries assets/config.json, the Agent
-      # declaration, and the release binds it; the flag waits until the Ora hosts that resolve
-      # the declaration are deployed — current hosts install an `agent`-kind package carrying
-      # it but then refuse to activate the plugin, so the bytes must not ship early.
+      # declaration, and the release binds it. A host that cannot compile the declaration installs
+      # such a package but then refuses to activate the plugin; the owner turned the flag on once
+      # the hosts that resolve it were accepted, so every release from here on ships it.
       - name: Package
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: deno task package --tag "$TAG" --repo "${{ github.repository }}"
+        run: deno task package --tag "$TAG" --repo "${{ github.repository }}" --agent-configuration
 
       - name: Create release
         env:

@@ -260,9 +260,10 @@ packages carry no declaration at all and current hosts install the release
 exactly as before. With it, the static copy (`dist/agent-configuration.json`,
 attached to the release and copied into the registry entry beside `orax.toml`)
 and the `[agent_configuration]` section in `manifest.toml` are written alongside
-the bytes. `release.yml` passes the flag only once the hosts resolving the
-declaration are deployed; that is an owner decision made by editing one line,
-not something this repository can detect.
+the bytes. `release.yml` passes the flag: the owner turned it on once the hosts
+resolving the declaration were accepted. That is an owner decision made by
+editing one line, not something this repository can detect, and turning it back
+off is the same one-line edit.
 
 The packaging script deliberately does not interpret the declaration's shape: it
 checks readable UTF-8, the 256 KiB size bound every host enforces, and reads
