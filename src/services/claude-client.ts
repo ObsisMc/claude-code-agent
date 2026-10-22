@@ -1,9 +1,4 @@
-import {
-  AGENT_UNUSABLE,
-  type HostProcesses,
-  type JsonValue,
-  PluginMethodError,
-} from "@ora-space/plugin-sdk";
+import type { HostProcesses, JsonValue } from "@ora-space/plugin-sdk";
 import { spawnBundledClaude, spawnClaude } from "./command.ts";
 import { logger } from "./log.ts";
 import { type FrozenModel, ModelGuard } from "./model-guard.ts";
@@ -13,26 +8,6 @@ import { decodeLines, encodeLine } from "./ndjson.ts";
 const log = logger("claude-client");
 /** The adapter's own stderr, republished line by line under its own target. */
 const adapterLog = logger("claude-agent-acp");
-
-/** How long the adapter may take to accept a platform route before `agent/start` fails. */
-const ROUTE_TIMEOUT_MS = 10_000;
-
-/**
- * JSON-RPC codes with which the adapter refuses the route itself: the request was malformed for
- * it, or this adapter has no `providers/set` at all. Either is a property of this package and the
- * configuration it was handed, so retrying the same start cannot succeed.
- */
-const ROUTE_REFUSED_CODES = new Set([-32601, -32602]);
-
-/**
- * What a route that could not be prepared is reported as: the adapter answers a gateway listing
- * that failed (a 503, a timeout) with an internal error, and that or a silent adapter can pass on
- * the next attempt. Ora retries any start failure that is neither of the two agent codes.
- */
-const ROUTE_NOT_PREPARED = -32603;
-
-/** Prefix of the request ids this bridge sends on its own; Ora's ids are numbers or its own text. */
-const ROUTE_REQUEST_PREFIX = "ora-claude-model-route-";
 
 /** The subset of a spawned child process this bridge depends on, so tests can substitute one. */
 export interface SpawnedProcess {
@@ -73,7 +48,7 @@ interface RunningProcess {
  * methods this host has never heard of. Without a platform route nothing here parses ACP; frames
  * are re-framed between Ora's binary envelope and the adapter's NDJSON and otherwise passed
  * through verbatim. With one, {@link ModelGuard} reads the frames that could change the route or
- * the model.
+ * the model, and gives every session the route's settings.
  */
 export class ClaudeClient {
   readonly #spawn: (
@@ -85,16 +60,11 @@ export class ClaudeClient {
   /** Supplied by `attachProcesses` once the plugin's `Plugin` instance exists; see `main.ts`. */
   #processes: HostProcesses | undefined;
   #running: RunningProcess | undefined;
-  /** Whether the running generation's route, if any, was accepted; reset by every start. */
-  #routeApplied = false;
   #expectedExit = false;
   /** The platform route every generation of the adapter starts with; absent on a local host. */
   #route: ModelRoute | undefined;
   /** Holds every ACP frame of a platform-model execution to its route and model. */
   #guard: ModelGuard | undefined;
-  /** This bridge's own outstanding requests, answered from stdout and never forwarded to Ora. */
-  readonly #pending = new Map<string, (frame: JsonValue) => void>();
-  #nextRequest = 0;
 
   constructor(options: ClaudeClientOptions = {}) {
     this.#spawn = options.spawn ??
@@ -113,12 +83,11 @@ export class ClaudeClient {
   }
 
   /**
-   * Whether the adapter is up and on the route it must use: a process that is still waiting for
-   * `providers/set` is running, but it would resolve a session on whatever routing it found.
+   * Whether the adapter is up and on the route it must use. The route is in the environment the
+   * adapter was spawned with, so a running adapter is already on it.
    */
   get ready(): boolean {
-    return this.#running !== undefined &&
-      (this.#route === undefined || this.#routeApplied);
+    return this.#running !== undefined;
   }
 
   /**
@@ -142,22 +111,21 @@ export class ClaudeClient {
     this.#route = route;
     this.#guard = route === undefined
       ? undefined
-      : new ModelGuard(route.model, routeSecrets(route));
+      : new ModelGuard(route.model, route.settings, routeSecrets(route));
   }
 
   /**
    * Spawns the ACP adapter in the given working directory and starts bridging its stdio.
    *
    * Any previous child is stopped first so a restart cannot leave two adapters writing frames into
-   * the same host connection. With a platform route, the adapter only counts as started once it
-   * accepted that route: a session created before `providers/set` would run on whatever routing
-   * Claude Code found by itself.
+   * the same host connection. With a platform route, the route's environment, token included, is
+   * the adapter's spawn environment: Claude Code inherits it, and the token never travels through
+   * an ACP frame or a settings object the CLI would receive on its command line.
    */
   async start(cwd: string): Promise<void> {
     const restarting = this.#running !== undefined;
     await this.stop();
     this.#expectedExit = false;
-    this.#routeApplied = false;
 
     log.info(restarting ? "restarting the adapter" : "starting the adapter", {
       context: { cwd },
@@ -174,78 +142,9 @@ export class ClaudeClient {
     this.#running = { process, stdinWriter: process.stdin.getWriter() };
     const route = this.#route;
     this.#attach(process, route === undefined ? "verbatim" : "sensitive");
-    if (route !== undefined) {
-      try {
-        await this.#applyRoute(route);
-      } catch (error) {
-        await this.stop();
-        throw error;
-      }
-      this.#routeApplied = true;
-    }
     log.info("adapter running", {
       context: { cwd, pid: process.pid, platformRoute: route !== undefined },
     });
-  }
-
-  /**
-   * Hands the adapter its platform route through `providers/set` and waits for it to be accepted.
-   *
-   * The request goes straight into the adapter's stdin with an id of this bridge's own, and its
-   * answer is consumed by `#pumpStdout` before anything is forwarded, so Ora never sees either
-   * frame. Neither the params nor an error payload is logged: the header carries the token.
-   *
-   * A refusal is classified by its code alone (ADR D2 keeps an incompatible configuration apart
-   * from a failed preparation): the adapter refusing the request is final, while a gateway listing
-   * that failed or an adapter that never answered may pass on the next start.
-   */
-  async #applyRoute(route: ModelRoute): Promise<void> {
-    const id = `${ROUTE_REQUEST_PREFIX}${++this.#nextRequest}`;
-    const answered = new Promise<JsonValue>((resolve) => {
-      this.#pending.set(id, resolve);
-    });
-    let timer: number | undefined;
-    const timedOut = new Promise<undefined>((resolve) => {
-      timer = setTimeout(() => resolve(undefined), ROUTE_TIMEOUT_MS);
-    });
-    try {
-      await this.#write({
-        jsonrpc: "2.0",
-        id,
-        method: "providers/set",
-        params: {
-          providerId: route.provider.providerId,
-          apiType: route.provider.apiType,
-          baseUrl: route.provider.baseUrl,
-          headers: { ...route.provider.headers },
-        },
-      });
-      const answer = await Promise.race([answered, timedOut]);
-      if (
-        answer !== undefined && typeof answer === "object" &&
-        answer !== null && !Array.isArray(answer) && "result" in answer &&
-        !("error" in answer)
-      ) {
-        return;
-      }
-      const code = errorCode(answer);
-      const refused = code !== undefined && ROUTE_REFUSED_CODES.has(code);
-      log.warn("the adapter did not accept the platform model route", {
-        context: { timedOut: answer === undefined, code, refused },
-      });
-      throw refused
-        ? new PluginMethodError(
-          AGENT_UNUSABLE,
-          "the Claude ACP adapter refused the platform model route",
-        )
-        : new PluginMethodError(
-          ROUTE_NOT_PREPARED,
-          "the Claude ACP adapter could not prepare the platform model route",
-        );
-    } finally {
-      clearTimeout(timer);
-      this.#pending.delete(id);
-    }
   }
 
   /**
@@ -256,7 +155,7 @@ export class ClaudeClient {
    *
    * On a platform route, every frame from Ora passes the {@link ModelGuard} first: a request that
    * would replace the route or the model is answered here with an error and never reaches the
-   * adapter, which is the only way to keep a client from undoing what `providers/set` applied.
+   * adapter, and a request that creates or restores a session carries the route's settings.
    */
   async writeAcp(frame: JsonValue): Promise<void> {
     const decision = this.#guard?.inbound(frame) ?? { forward: frame };
@@ -282,7 +181,7 @@ export class ClaudeClient {
     await this.#write(decision.forward);
   }
 
-  /** Writes one frame into the adapter's stdin as-is; this bridge's own requests come here. */
+  /** Writes one frame into the adapter's stdin as-is. */
   async #write(frame: JsonValue): Promise<void> {
     const running = this.#running;
     if (running === undefined) {
@@ -392,13 +291,6 @@ export class ClaudeClient {
           });
           continue;
         }
-        const own = typeof frame.id === "string"
-          ? this.#pending.get(frame.id)
-          : undefined;
-        if (own !== undefined && !("method" in frame)) {
-          own(frame);
-          continue;
-        }
         log.debug("adapter ACP frame received", {
           context: { pid: process.pid, ...summarize(frame) },
         });
@@ -492,13 +384,8 @@ export class ClaudeClient {
  * every spelling a message is likely to use (base URL, host with port, bare hostname).
  */
 function routeSecrets(route: ModelRoute): string[] {
-  const gateway = new URL(route.provider.baseUrl);
-  return [
-    ...Object.values(route.provider.headers),
-    route.provider.baseUrl,
-    gateway.host,
-    gateway.hostname,
-  ];
+  const gateway = new URL(route.baseUrl);
+  return [route.token, route.baseUrl, gateway.host, gateway.hostname];
 }
 
 /**
@@ -506,23 +393,6 @@ function routeSecrets(route: ModelRoute): string[] {
  * on a platform route.
  */
 type AdapterOutput = "verbatim" | "sensitive";
-
-/** The JSON-RPC error code of one answer, if it is an error with an integer code. */
-function errorCode(answer: JsonValue | undefined): number | undefined {
-  if (
-    answer === undefined || answer === null || typeof answer !== "object" ||
-    Array.isArray(answer)
-  ) {
-    return undefined;
-  }
-  const error = answer.error;
-  if (error === null || typeof error !== "object" || Array.isArray(error)) {
-    return undefined;
-  }
-  return typeof error.code === "number" && Number.isInteger(error.code)
-    ? error.code
-    : undefined;
-}
 
 /** The envelope fields of one frame that are safe to log: never its params or result. */
 function summarize(frame: JsonValue): Record<string, unknown> {

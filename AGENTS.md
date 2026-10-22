@@ -361,44 +361,46 @@ plugin, not the host, turns that into Claude Code's routing
 returns the exact `AgentModelApplied` — so ACP never begins on an unapplied
 route.
 
-The route is applied through the adapter's own `providers/set`, sent by the
-bridge right after spawn and **before** `agent/start` returns:
+The route reaches Claude Code in two parts, split by who may read them:
 
-- `claude-agent-acp` puts a provider route into Claude Code's programmatic
-  settings tier with `apiKeyHelper` cleared. That is the only reason a
-  repository's `.claude/settings.json` (or a user setting) cannot restore a
-  different `ANTHROPIC_BASE_URL` and send the token there. Setting
-  `ANTHROPIC_BASE_URL` in the spawn environment would not have that property.
-- The token travels as the `x-api-key` header of that request, which the
-  platform gateway reads first on its Messages route. This plugin never puts it
-  in the adapter's spawn environment or a log, but the pinned adapter does not
-  keep it in that request either: it merges the header into the Claude Code
-  process environment (`ANTHROPIC_CUSTOM_HEADERS`) **and** into the `env` of the
-  programmatic settings, and the Claude Agent SDK passes those settings to the
-  CLI as a `--settings` argument. The token is therefore readable in the CLI's
-  command line by anyone who can list that process. It is valid for one
-  execution only, but it is not confined to memory and the execution's own
-  environment, and that is a known gap until the route stops reaching the
-  settings.
+- **The token is only in the adapter's spawn environment.** It is the
+  `x-api-key` header in `ANTHROPIC_CUSTOM_HEADERS`, which the platform gateway
+  reads first on its Messages route, and Claude Code inherits it from the
+  adapter. A process's environment is readable by its own identity alone; its
+  command line is readable by anyone who can list processes. The token never
+  travels in an ACP frame, a log, or a settings object.
+- **The routing without the token is in flag settings.** `ModelGuard` puts
+  `apiKeyHelper: ""` and the routing environment (the gateway base URL, a
+  placeholder `ANTHROPIC_AUTH_TOKEN`, and every other upstream and credential
+  source cleared) into `_meta.claudeCode.options.settings` of every session
+  setup. The Claude Agent SDK hands those settings to the CLI as a `--settings`
+  argument, so nothing secret may ever go there. Flag settings outrank a
+  repository's `.claude/settings.json` and every user setting, which is what
+  keeps either from pointing the token at another base URL or restoring another
+  credential. Setting `ANTHROPIC_BASE_URL` in the spawn environment alone would
+  not: Claude Code applies a settings file's `env` after the process
+  environment. A setting that replaces `ANTHROPIC_CUSTOM_HEADERS` only drops the
+  token, and the gateway refuses the request.
+- **The adapter's own `providers/set` is not used.** The pinned
+  `claude-agent-acp` merges a provider's headers into the same `env` it puts in
+  the programmatic settings, so a route applied through it puts the token on the
+  CLI's command line. `tests/argv_test.ts` (`deno task test:argv`, the `argv` CI
+  job) runs the pinned adapter and CLI on a route and fails if any process they
+  start shows the token in its arguments; a new pin must pass it before it ships
+  with a declaration.
 - The model aliases Claude Code resolves by itself (main, small/fast, subagent,
   `opus`/`sonnet`/`haiku`) are pinned to the frozen model in the spawn
   environment. A setting that overrides one fails closed at the gateway, which
   serves only the frozen model id. `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is the frozen
   model's own `maxTokens`.
 - A context frozen for another plugin id or another target triple, a token with
-  a control character in it (a header cannot carry one, and the adapter would
-  only fail later, retryably), or a non-positive `maxTokens` is refused with
-  `INVALID_PARAMS` before anything starts.
+  a control character in it (a header cannot carry one), or a non-positive
+  `maxTokens` is refused with `INVALID_PARAMS` before anything starts.
 - `ClaudeClient.useRoute` keeps the route for every later start, so an Effect
-  `reactivate` restart reapplies it before the adapter counts as ready.
-  `ClaudeClient.ready`, not `running`, is what readiness and the Effect replay
-  read: a process waiting for `providers/set` is running but on no route yet.
-- A route that fails is classified by the adapter's code alone. `invalid_params`
-  or `method_not_found` means this adapter refuses the configuration and fails
-  as `AGENT_UNUSABLE`, which Ora does not retry. Anything else, or no answer
-  within ten seconds, fails with `-32603`, which Ora retries: the pinned adapter
-  lists the gateway's models inside `providers/set`, and a listing that failed
-  (a 503, a timeout) answers as an internal error that the next start can pass.
+  `reactivate` restart spawns the adapter on the same route. A running adapter
+  is already on its route, so `ClaudeClient.ready` is `running`.
+- Nothing is checked against the gateway at start: a gateway that is down fails
+  the first turn, not `agent/start`.
 - Only the pair this package ships runs on a route. `spawnBundledClaude` asks
   the host for the bundled adapter alone — no `ORA_CLAUDE_ACP_BIN`, no PATH —
   and fails as `AGENT_UNUSABLE` when the package cannot run it;
@@ -407,24 +409,23 @@ bridge right after spawn and **before** `agent/start` returns:
   the same way.
 
 This is the second narrow exception to "ACP payloads are never parsed": the
-bridge writes one request of its own (`id` prefixed `ora-claude-model-route-`)
-and consumes its answer by id before forwarding anything, so Ora never sees
-either frame. A different `claude-agent-acp` pin must be checked for the same
-`providers/set` behaviour before it ships with a declaration.
+bridge rewrites the options of every session setup request, so the route's
+settings are in every session whether or not Ora sent options of its own.
 
 Applying the route once is not enough: the same ACP connection could undo it. On
 a platform route `services/model-guard.ts` reads Ora's frames before they reach
 the adapter and answers these itself, so the adapter never sees them:
 
 - `authenticate`, `logout`, `auth/*`, `_auth/*`, `providers/*` and
-  `_providers/*` — `logout` and `providers/disable` clear the route and send
-  Claude Code back to its own login, the others install a different upstream.
+  `_providers/*` — `logout` and `providers/disable` reset the adapter's routing
+  and send Claude Code back to its own login, the others install a different
+  upstream over the route.
 - `session/set_model` and the `model` config option for anything but the frozen
   model. Re-selecting the frozen model is answered as a no-op.
 - `_meta.claudeCode.options` on session setup loses `model`, `fallbackModel`,
-  `env`, `settings`, `extraArgs` and the executable overrides: the adapter
-  spreads them over its own environment, where they would outrank the pinned
-  aliases.
+  `env`, `extraArgs` and the executable overrides: the adapter spreads them over
+  its own environment, where they would outrank the pinned aliases. Its
+  `settings` is replaced with the route's.
 
 The adapter's own model selector is narrowed the same way: every `configOptions`
 model entry (and a `models` state, should a pin send one) in a result or a
@@ -434,10 +435,10 @@ host's own credentials and routing.
 
 Nothing the adapter prints on a route is trusted. Its stderr is not logged at
 all, only how many lines it wrote, and a stdout line that is not a frame is
-logged by length, not content: the adapter logs `[providers/set] ... baseUrl=`,
-and Claude Code echoes a failed request with the upstream's response body, its
-host and path, and paths of the machine it runs on. Scrubbing known secrets out
-of that text would still keep the rest. Every adapter error response keeps its
+logged by length, not content: the adapter logs the base URL it routes to, and
+Claude Code echoes a failed request with the upstream's response body, its host
+and path, and paths of the machine it runs on. Scrubbing known secrets out of
+that text would still keep the rest. Every adapter error response keeps its
 `code` but loses its `message` and `data`. ACP frames are still forwarded, with
 the token, the gateway base URL, its host and its hostname replaced with
 `[redacted]`; an agent message can quote an upstream error in its own text, and

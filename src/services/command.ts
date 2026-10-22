@@ -82,10 +82,10 @@ export function spawnClaude(
  *
  * A platform route is applied to, and tested against, the adapter and CLI pair this package
  * bundles; `ORA_CLAUDE_ACP_BIN` or an install on PATH could be any other build, with any other
- * idea of what `providers/set` means. So neither is consulted, and a package that cannot run its
- * own adapter fails the start as `AGENT_UNUSABLE` rather than looking further. The CLI the
- * adapter drives is held to the bundled one by `ORA_CLAUDE_BUNDLED_CLI_ONLY` in the route's
- * environment, which `scripts/adapter-entry.mjs` reads.
+ * idea of how a route's environment and settings combine. So neither is consulted, and a package
+ * that cannot run its own adapter fails the start as `AGENT_UNUSABLE` rather than looking further.
+ * The CLI the adapter drives is held to the bundled one by `ORA_CLAUDE_BUNDLED_CLI_ONLY` in the
+ * route's environment, which `scripts/adapter-entry.mjs` reads.
  */
 export async function spawnBundledClaude(
   processes: HostProcesses,

@@ -226,7 +226,7 @@ export class SkillEffectCoordinator {
         );
       }
     } finally {
-      // A restart that failed (a route the adapter refused or never answered) must not keep the
+      // A restart that failed (an adapter the host could not spawn) must not keep the
       // barrier up: nothing would ever lower it, and every prompt held behind it would wait for
       // the life of the process. `#release` drops what no adapter is running to receive.
       await this.#release();

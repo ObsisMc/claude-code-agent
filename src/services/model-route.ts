@@ -6,41 +6,54 @@ import {
 } from "@ora-space/plugin-sdk";
 import type { FrozenModel } from "./model-guard.ts";
 
-/** The adapter's single client-managed provider slot, as `providers/list` names it. */
-const PROVIDER_ID = "main";
-
 /** This plugin's id without its namespace; the host registers it under the namespace it owns. */
 export const PLUGIN_ID = "ora-space.claude";
 
 /**
- * Bytes a header value cannot carry. The adapter would refuse such a token only when it lists the
- * gateway's models, as a failed preparation that a retry repeats forever.
+ * Bytes a header value cannot carry. Claude Code would refuse such a token only when it sends its
+ * first request, as a failed turn that a retry repeats forever.
  */
 // deno-lint-ignore no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 
 /**
+ * The bearer Claude Code is given so it skips its own login check. The gateway authenticates the
+ * `x-api-key` header first, so this value never authenticates anything; it is the same placeholder
+ * the pinned adapter uses for a route of its own.
+ */
+const AUTH_TOKEN_PLACEHOLDER = "acp-proxy";
+
+/**
  * Everything one platform-model execution needs from this plugin, derived once at `agent/start`.
  *
- * `provider` becomes the adapter's `providers/set` call: the adapter puts that route into Claude
- * Code's programmatic settings tier with `apiKeyHelper` cleared, so a repository's
- * `.claude/settings.json` or a user setting cannot silently send the request, and the token in its
- * header, to another base URL. `environment` pins every model alias Claude Code resolves on its own
- * (the main model, the auxiliary small/fast model, subagents and the `opus`/`sonnet`/`haiku`
- * shortcuts) to the one frozen model; the gateway still refuses any other model id, so a setting
- * that overrides an alias fails closed instead of reaching a model nobody admitted.
+ * The route is split by what may be seen. `environment` is the adapter's spawn environment, which
+ * Claude Code inherits: it alone carries the token, as the `x-api-key` header in
+ * `ANTHROPIC_CUSTOM_HEADERS`, and only the execution's own identity can read it there.
+ * `settings` goes into every session's `_meta.claudeCode.options.settings`, which the Claude Agent
+ * SDK hands the CLI as a `--settings` argument that anyone listing processes can read; it holds
+ * the routing without the token. As flag settings it outranks a repository's
+ * `.claude/settings.json` and every user setting, so neither can point the token at another base
+ * URL or restore another credential source; a setting that replaces the header only drops the
+ * token, and the gateway refuses the request.
+ *
+ * `environment` also pins every model alias Claude Code resolves on its own (the main model, the
+ * auxiliary small/fast model, subagents and the `opus`/`sonnet`/`haiku` shortcuts) to the one
+ * frozen model; the gateway still refuses any other model id, so a setting that overrides an alias
+ * fails closed instead of reaching a model nobody admitted.
  */
 export interface ModelRoute {
   readonly applied: AgentModelApplied;
   /** The one model this execution may use; every selector and switch is held to it. */
   readonly model: FrozenModel;
-  readonly provider: {
-    readonly providerId: string;
-    readonly apiType: "anthropic";
-    readonly baseUrl: string;
-    readonly headers: Readonly<Record<string, string>>;
-  };
+  /** The gateway base URL Claude Code appends `/v1/messages` to. */
+  readonly baseUrl: string;
+  /** The temporary credential; it may appear in `environment` and nowhere else. */
+  readonly token: string;
   readonly environment: Readonly<Record<string, string>>;
+  readonly settings: {
+    readonly apiKeyHelper: string;
+    readonly env: Readonly<Record<string, string>>;
+  };
 }
 
 /**
@@ -76,6 +89,7 @@ export function modelRoute(context: AgentModelContext): ModelRoute {
     refuse();
   }
   const model = configuration.model.id;
+  const routing = routingEnvironment(proxy);
   return {
     applied: {
       adapterVersion: configuration.adapterVersion,
@@ -83,15 +97,11 @@ export function modelRoute(context: AgentModelContext): ModelRoute {
       configurationRevision: configuration.configurationRevision,
     },
     model: { id: model, name: configuration.model.name },
-    provider: {
-      providerId: PROVIDER_ID,
-      apiType: "anthropic",
-      baseUrl: proxy,
-      // The gateway reads `x-api-key` first on its Messages route; the adapter's own placeholder
-      // bearer token then never authenticates anything.
-      headers: { "x-api-key": context.token },
-    },
+    baseUrl: proxy,
+    token: context.token,
     environment: {
+      ...routing,
+      ANTHROPIC_CUSTOM_HEADERS: `x-api-key: ${context.token}`,
       ANTHROPIC_MODEL: model,
       ANTHROPIC_SMALL_FAST_MODEL: model,
       ANTHROPIC_DEFAULT_OPUS_MODEL: model,
@@ -108,6 +118,31 @@ export function modelRoute(context: AgentModelContext): ModelRoute {
       // ignored, see `scripts/adapter-entry.mjs`.
       ORA_CLAUDE_BUNDLED_CLI_ONLY: "1",
     },
+    settings: { apiKeyHelper: "", env: routing },
+  };
+}
+
+/**
+ * The routing Claude Code must use, none of it secret: the gateway, a placeholder bearer, and
+ * every other upstream and credential source cleared.
+ *
+ * It is the reset the pinned adapter applies for a route of its own, so a host environment that
+ * carries a shared key or a cloud-provider switch cannot pull the CLI elsewhere. It appears twice:
+ * in the spawn environment, and in the flag settings that outrank what a repository sets.
+ */
+function routingEnvironment(baseUrl: string): Record<string, string> {
+  return {
+    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_AUTH_TOKEN: AUTH_TOKEN_PLACEHOLDER,
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+    ANTHROPIC_BEDROCK_BASE_URL: "",
+    ANTHROPIC_VERTEX_BASE_URL: "",
+    CLAUDE_CODE_USE_BEDROCK: "0",
+    CLAUDE_CODE_USE_VERTEX: "0",
+    ANTHROPIC_VERTEX_PROJECT_ID: "",
+    CLOUD_ML_REGION: "",
+    AWS_REGION: "",
   };
 }
 
