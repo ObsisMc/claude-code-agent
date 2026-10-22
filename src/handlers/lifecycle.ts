@@ -16,9 +16,10 @@ const log = logger("lifecycle");
  * accepting ACP frames when the host runs its own `initialize` handshake. Per-session directories
  * travel later in ACP `session/new`, not here.
  *
- * A platform-model start carries a frozen model context. It is confirmed only after the adapter
- * accepted the route built from it, which is what the host waits for before it lets ACP begin; a
- * start without one keeps the adapter's own routing, exactly as on a local desktop.
+ * A platform-model start carries a frozen model context. It is confirmed once the adapter is
+ * spawned with the route built from it in its environment, which is what the host waits for before
+ * it lets ACP begin; a start without one keeps the adapter's own routing, exactly as on a local
+ * desktop.
  */
 export async function startClaude(
   client: ClaudeClient,
