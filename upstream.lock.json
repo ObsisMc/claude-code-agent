@@ -1,9 +1,9 @@
 {
   "adapter": {
     "name": "@agentclientprotocol/claude-agent-acp",
-    "version": "0.97.0",
-    "integrity": "sha512-4bSqO6eb8PjxHTtKsXvjqmsk0qeYfxSNwIG58mn6+7U7XOqHSLMvJ8aR4LeJIdNz1sSlzYniPXxO0DEs29SCPw==",
-    "tarball": "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.97.0.tgz"
+    "version": "0.98.0",
+    "integrity": "sha512-6UGEODegNXXgS6wKX9T1v72oSLVtSmM1N/9H780ljqkaR7B+OdlfMYFdscNurfodt9l3xjGy0Bga/NtnLs/Vlw==",
+    "tarball": "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.98.0.tgz"
   },
   "agentSdk": {
     "name": "@anthropic-ai/claude-agent-sdk",
