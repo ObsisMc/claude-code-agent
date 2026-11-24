@@ -13,7 +13,6 @@ import {
   runAgentPlugin,
 } from "./base/agent-plugin.ts";
 import { forwardAcpFrame } from "./handlers/acp.ts";
-import { SkillEffectCoordinator } from "./handlers/effects.ts";
 import { startClaude, stopClaude } from "./handlers/lifecycle.ts";
 import {
   invalidateAllClaudeModels,
@@ -37,10 +36,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
   /** Set by `onActivate`, which the base class runs before the host can call anything. */
   #processes: HostProcesses | undefined;
   /**
-   * Workspace of the live ACP process.
-   *
-   * Used to invalidate its model catalog on lifecycle events, and as the directory a Skill Effect
-   * restart respawns the adapter into.
+   * Workspace of the live ACP process, used to invalidate its model catalog on lifecycle events.
    */
   #cwd: string | undefined;
 
@@ -48,7 +44,6 @@ class ClaudeAgentPlugin extends AgentPlugin {
 
   readonly #client = new ClaudeClient({
     onAcpFrame: (frame) => {
-      this.#effects.observe(frame);
       if (this.#send === undefined) {
         this.#log.warn(
           "dropping ACP frame from the adapter: no host sender yet",
@@ -77,10 +72,6 @@ class ClaudeAgentPlugin extends AgentPlugin {
       );
     },
   });
-
-  readonly #effects = new SkillEffectCoordinator(this.#client, () => this.#cwd);
-
-  override readonly effects = this.#effects.definition;
 
   override onActivate(context: PluginContext): void {
     this.#log.info(`${context.pluginId} activated`, {
@@ -120,7 +111,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
     listAgentModels(this.#client, this.#processes, context.cwd);
 
   override onAcp = (frame: JsonValue): Promise<void> | void =>
-    forwardAcpFrame(this.#client, this.#effects, frame);
+    forwardAcpFrame(this.#client, frame);
 
   override async onDeactivate(): Promise<void> {
     this.#log.info("plugin deactivating; stopping the adapter", {

@@ -43,12 +43,12 @@ interface RunningProcess {
  *
  * The adapter is a native ACP server: it takes no subcommand and no arguments, reads its initial
  * directory from the spawn cwd, and receives every per-session directory through ACP `session/new`.
- * The plugin owns its whole lifetime — spawn on `agent/start`, kill on `agent/stop`, respawn on an
- * Effect `reactivate` — so Ora never sees the child's stdio, which is what lets Claude Code use ACP
- * methods this host has never heard of. Without a platform route nothing here parses ACP; frames
- * are re-framed between Ora's binary envelope and the adapter's NDJSON and otherwise passed
- * through verbatim. With one, {@link ModelGuard} reads the frames that could change the route or
- * the model, and gives every session the route's settings.
+ * The plugin owns its whole lifetime — spawn on `agent/start`, kill on `agent/stop` — so Ora
+ * never sees the child's stdio, which is what lets Claude Code use ACP methods this host has never
+ * heard of. Without a platform route nothing here parses ACP; frames are re-framed between Ora's
+ * binary envelope and the adapter's NDJSON and otherwise passed through verbatim. With one,
+ * {@link ModelGuard} reads the frames that could change the route or the model, and gives every
+ * session the route's settings.
  */
 export class ClaudeClient {
   readonly #spawn: (
@@ -102,7 +102,7 @@ export class ClaudeClient {
   }
 
   /**
-   * Fixes the platform route for every later start, including an Effect restart.
+   * Fixes the platform route for every later start.
    *
    * One plugin process serves one execution, so the route is set once per `agent/start` and never
    * switched between users while sessions run; `undefined` returns to the adapter's own routing.
@@ -230,10 +230,10 @@ export class ClaudeClient {
     void this.#pumpStdout(process, output);
     void this.#pumpStderr(process, output);
     void process.exited.then(() => {
-      // A process that is no longer `#running` was already superseded by a later `start()` (an
-      // Effect restart, for instance); its death is old news, not a live agent going away, so it
-      // must never clear the new process's tracking or fire `onExited` regardless of the shared
-      // `#expectedExit` flag, which by then reflects the newer generation's intent, not this one's.
+      // A process that is no longer `#running` was already superseded by a later `start()`; its
+      // death is old news, not a live agent going away, so it must never clear the new process's
+      // tracking or fire `onExited` regardless of the shared `#expectedExit` flag, which by then
+      // reflects the newer generation's intent, not this one's.
       if (this.#running?.process !== process) {
         log.debug("a superseded adapter generation exited", {
           context: { pid: process.pid },

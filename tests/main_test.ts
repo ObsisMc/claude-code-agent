@@ -5,16 +5,8 @@ import type {
   HostProcesses,
   JsonValue,
 } from "@ora-space/plugin-sdk";
-import {
-  AGENT_NOT_INSTALLED,
-  HostRequestError,
-  SKILL_DIRECTORY_V1,
-} from "@ora-space/plugin-sdk";
+import { AGENT_NOT_INSTALLED, HostRequestError } from "@ora-space/plugin-sdk";
 import { forwardAcpFrame } from "../src/handlers/acp.ts";
-import {
-  SkillEffectCoordinator,
-  SKILLS_RESOURCE,
-} from "../src/handlers/effects.ts";
 import { listClaudeModels } from "../src/handlers/models.ts";
 import { BIN_ENV_VAR, resolveClaudeCommands } from "../src/services/command.ts";
 import {
@@ -376,157 +368,42 @@ Deno.test("discovery without a workspace is refused rather than guessed", () => 
   assertEquals(error?.code, -32602);
 });
 
-Deno.test("the Skill Resource is declared in the shape Ora materializes", () => {
-  // Without this declaration `ora/register` omits `effectResources` entirely and Ora silently has
-  // nothing to write into the Workspace, which is the failure this whole handler exists to avoid.
-  assertEquals(SKILLS_RESOURCE.workspaceRelativePath, ".claude/skills");
-  assertEquals(SKILLS_RESOURCE.materializationFormat, SKILL_DIRECTORY_V1);
-  assertEquals(SKILLS_RESOURCE.coordination, "quiesce_before_mutation");
-});
-
-Deno.test("the entrypoint mounts the effect definition onto the base class", async () => {
-  // A source-text check because `src/main.ts` calls `runAgentPlugin` at module scope: importing it
-  // would start serving the host. It is worth having anyway — this exact wiring is what was once
-  // missing, and its absence is invisible at runtime. `ora/register` simply omits
-  // `effectResources`, Ora materializes nothing, and no error is raised anywhere.
+Deno.test("the plugin declares no Skill Effect wiring or methods", async () => {
   const entrypoint = await Deno.readTextFile(
     new URL("../src/main.ts", import.meta.url),
   );
-  assertEquals(entrypoint.includes("override readonly effects ="), true);
-  assertEquals(entrypoint.includes("SkillEffectCoordinator"), true);
+  assertEquals(entrypoint.includes("SkillEffectCoordinator"), false);
+  assertEquals(entrypoint.includes("effects"), false);
 
   const base = await Deno.readTextFile(
     new URL("../src/base/agent-plugin.ts", import.meta.url),
   );
-  assertEquals(base.includes("effects: plugin.effects"), true);
+  assertEquals(base.includes("AgentEffectDefinition"), false);
+  assertEquals(base.includes("plugin.effects"), false);
 });
 
-Deno.test("the effect definition serves all three Consumer calls", () => {
-  const { definition } = new SkillEffectCoordinator(
-    new ClaudeClient(),
-    () => undefined,
-  );
-  assertEquals(definition.resources, [SKILLS_RESOURCE]);
-  assertEquals(typeof definition.coordinate, "function");
-  assertEquals(typeof definition.reactivate, "function");
-  assertEquals(typeof definition.verifyReady, "function");
-});
-
-Deno.test("coordination waits for a running turn, then reports safe to mutate", async () => {
+Deno.test("forwardAcpFrame pipes setup fields and prompts verbatim to the adapter", async () => {
   const { client, written } = await runningClient();
-  const effects = new SkillEffectCoordinator(client, () => "/workspace");
+  const setup = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "session/new",
+    params: {
+      cwd: "/workspace",
+      additionalDirectories: ["/data/atoms/skills", "/home/plugins/installed"],
+      _meta: { "ora/skillDirectories": ["/data/atoms/skills/review"] },
+    },
+  };
   const prompt = { jsonrpc: "2.0", id: 7, method: "session/prompt" };
 
-  // Forwarded, and its id remembered as an open turn.
-  await forwardAcpFrame(client, effects, prompt);
-  assertEquals(written, [prompt]);
+  await forwardAcpFrame(client, setup);
+  await forwardAcpFrame(client, prompt);
+  assertEquals(written, [setup, prompt]);
 
-  // Normalized to a promise because the contract lets a Consumer answer synchronously; this one
-  // never does while a turn is open, which is exactly what the pending check below asserts.
-  const coordinating = Promise.resolve(effects.definition.coordinate({
-    targetId: "t1",
-    resourceIds: ["r1"],
-  }));
-  // The turn is still open, so the answer cannot have arrived yet.
-  assertEquals(await settled(coordinating), false);
-
-  effects.observe({ jsonrpc: "2.0", id: 7, result: {} });
-  assertEquals(await coordinating, { targetId: "t1", state: "safe_to_mutate" });
   await client.stop();
-});
-
-Deno.test("a turn arriving mid-mutation is held, then replayed after the restart", async () => {
-  const spawns: number[] = [];
-  const { client, written } = await runningClient(spawns);
-  const effects = new SkillEffectCoordinator(client, () => "/workspace");
-
-  await effects.definition.coordinate({ targetId: "t1", resourceIds: ["r1"] });
-  const prompt = { jsonrpc: "2.0", id: 9, method: "session/prompt" };
-  // Absorbed rather than forwarded: it must not reach an adapter that has not read the new Skills.
-  await forwardAcpFrame(client, effects, prompt);
-  assertEquals(written, []);
-
-  assertEquals(
-    await effects.definition.reactivate({
-      targetId: "t1",
-      resourceIds: ["r1"],
-    }),
-    { targetId: "t1", state: "reactivated" },
-  );
-  assertEquals(
-    spawns.length,
-    2,
-    "the adapter is respawned so it rereads the tree",
-  );
-  assertEquals(written, [prompt]);
-  await client.stop();
-});
-
-Deno.test("readiness is refused until a rescanned adapter is running", async () => {
-  const readiness = {
-    targetId: "t1",
-    generation: 3,
-    consumerRevisionId: "c1",
-    projectionDigest: "d1",
-  };
-  const down = new SkillEffectCoordinator(
-    new ClaudeClient(),
-    () => undefined,
-  );
-  assertEquals(codeOf(() => down.definition.verifyReady(readiness)), -32000);
-
-  const { client } = await runningClient();
-  const effects = new SkillEffectCoordinator(client, () => "/workspace");
-  await effects.definition.coordinate({ targetId: "t1", resourceIds: ["r1"] });
-  // Quiesced: the process is up but has not reread the tree, so it cannot be marked ready.
-  assertEquals(codeOf(() => effects.definition.verifyReady(readiness)), -32000);
-
-  await effects.definition.reactivate({ targetId: "t1", resourceIds: ["r1"] });
-  assertEquals(effects.definition.verifyReady(readiness), readiness);
-  await client.stop();
-});
-
-Deno.test("a repeated reactivation does not restart an already rescanned adapter", async () => {
-  const spawns: number[] = [];
-  const { client } = await runningClient(spawns);
-  const effects = new SkillEffectCoordinator(client, () => "/workspace");
-  await effects.definition.coordinate({ targetId: "t1", resourceIds: ["r1"] });
-  await effects.definition.reactivate({ targetId: "t1", resourceIds: ["r1"] });
-  await effects.definition.reactivate({ targetId: "t1", resourceIds: ["r1"] });
-  // Ora may retry either coordination call; a second restart would tear down the sessions that
-  // came back after the first one.
-  assertEquals(spawns.length, 2);
-  await client.stop();
-});
-
-Deno.test("a restart that fails still lowers the barrier", async () => {
-  const written: JsonValue[] = [];
-  let spawns = 0;
-  const client = new ClaudeClient({
-    spawn: () => {
-      spawns += 1;
-      // The second spawn is the reactivation restart; a route the adapter refused fails it alike.
-      if (spawns > 1) throw new Error("the adapter could not be spawned");
-      return scriptedProcess(written);
-    },
-  });
-  await client.start("/workspace");
-  const effects = new SkillEffectCoordinator(client, () => "/workspace");
-  await effects.definition.coordinate({ targetId: "t1", resourceIds: ["r1"] });
-  const held = { jsonrpc: "2.0", id: 9, method: "session/prompt" };
-  await forwardAcpFrame(client, effects, held);
-
-  await assertRejects(() =>
-    Promise.resolve(effects.definition.reactivate({
-      targetId: "t1",
-      resourceIds: ["r1"],
-    }))
-  );
-  // Nothing is left behind the barrier: a later turn is no longer absorbed, and nothing was
-  // written into an adapter that is not running.
-  const later = { jsonrpc: "2.0", id: 10, method: "session/prompt" };
-  assertEquals(effects.intercept(later), false);
-  assertEquals(written, []);
+  const afterStop = { jsonrpc: "2.0", id: 10, method: "session/prompt" };
+  await forwardAcpFrame(client, afterStop);
+  assertEquals(written, [setup, prompt]);
 });
 
 Deno.test("NDJSON reassembles frames split across chunks and CRLF", async () => {
@@ -656,41 +533,15 @@ function fakeProcesses(
   };
 }
 
-/** Reports the JSON-RPC code a synchronous call threw, or `undefined` when it returned. */
-function codeOf(body: () => unknown): number | undefined {
-  try {
-    body();
-    return undefined;
-  } catch (thrown) {
-    return (thrown as { code?: number }).code;
-  }
-}
-
-/** Reports whether a promise has already settled, without awaiting its result. */
-function settled(promise: Promise<unknown>): Promise<boolean> {
-  const pending = Symbol("pending");
-  return Promise.race([promise.then(() => true), Promise.resolve(pending)])
-    .then((winner) => winner !== pending);
-}
-
 /**
  * Starts a `ClaudeClient` over a scripted adapter, recording every frame written to it.
- *
- * The seam is the client's `spawn` option rather than a `HostProcesses`, because what these tests
- * exercise is the coordinator's effect on the bridge — which frames reach the adapter, and how
- * many processes a restart leaves behind — not how a program is resolved.
  */
-async function runningClient(
-  spawns: number[] = [],
-): Promise<{ client: ClaudeClient; written: JsonValue[] }> {
+async function runningClient(): Promise<
+  { client: ClaudeClient; written: JsonValue[] }
+> {
   const written: JsonValue[] = [];
   const client = new ClaudeClient({
-    spawn: () => {
-      spawns.push(spawns.length + 1);
-      // Each restart gets its own recorder-backed process; frames written to a superseded one
-      // would show up here too, which is exactly what the replay assertions need to see.
-      return scriptedProcess(written);
-    },
+    spawn: () => scriptedProcess(written),
   });
   await client.start("/workspace");
   return { client, written };

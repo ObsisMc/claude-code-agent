@@ -210,7 +210,7 @@ Deno.test("a platform start spawns the adapter on its route and sends it nothing
   assertEquals(client.ready, false);
 });
 
-Deno.test("an Effect restart spawns the adapter on the same route", async () => {
+Deno.test("a subsequent start spawns the adapter on the same route", async () => {
   const adapter = new ScriptedAdapter();
   const client = new ClaudeClient({
     spawn: (_cwd, env) => adapter.spawn(env),

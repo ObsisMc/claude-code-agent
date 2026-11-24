@@ -6,9 +6,9 @@ protocol on stdio and bridges `claude-agent-acp` to Ora as an ACP pipe.
 easy to get wrong and expensive to rediscover. It follows the same shape as the
 sibling `codeagent-agent/AGENTS.md` and `opencode-agent/AGENTS.md` — this
 package used to lag them on an older SDK pin (`0.3.0`, no `HostProcesses`,
-`waitForIdle`/`restart` Effect Surfaces, camelCase `agent/listModels`) until it
-was migrated onto `0.9.0` to match and now tracks `0.10.0`; see the root
-`../AGENTS.md` for the general rule this migration exists to satisfy.
+camelCase `agent/listModels`) until it was migrated onto `0.9.0` to match and
+now tracks `0.10.0`; see the root `../AGENTS.md` for the general rule this
+migration exists to satisfy.
 
 ## This is an agent plugin, and an agent plugin implements the whole SDK contract
 
@@ -20,76 +20,23 @@ declare. There is no warning, no log line, and no error surfaced to the user.
 Every API the plugin SDK offers an agent must be served, not just the ones a
 feature currently exercises:
 
-| SDK surface                                                                                                                             | Where it is mounted                                     | What is lost by omitting it                                                  |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `agent/start` · `agent/stop`                                                                                                            | `handlers/lifecycle.ts`                                 | the agent cannot run at all — these are `abstract`, so this fails to compile |
-| `agent/list_models`                                                                                                                     | `handlers/models.ts`                                    | no model picker; also `abstract`                                             |
-| `agent/acp` (both directions)                                                                                                           | `handlers/acp.ts` + `services/claude-client.ts`         | no conversation; also `abstract`                                             |
-| **Effect Resources** — `effect/coordinate`, `effect/reactivate`, `effect/verify_ready`, and the `EffectResourceDeclaration` behind them | `handlers/effects.ts`, mounted as `AgentPlugin.effects` | **Skills never appear in the Workspace, with no error anywhere**             |
+| SDK surface                   | Where it is mounted                             | What is lost by omitting it                                                  |
+| ----------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| `agent/start` · `agent/stop`  | `handlers/lifecycle.ts`                         | the agent cannot run at all — these are `abstract`, so this fails to compile |
+| `agent/list_models`           | `handlers/models.ts`                            | no model picker; also `abstract`                                             |
+| `agent/acp` (both directions) | `handlers/acp.ts` + `services/claude-client.ts` | no conversation; also `abstract`                                             |
 
-The Effect row is the one that has actually shipped broken before, in the
-sibling `codeagent-agent`. Read the next section before touching anything about
-Skills.
+## Skills arrive over ACP, not Effect materialization
 
-## Effects are opt-in, and opting out is invisible
-
-The Skill directory Ora writes into a Workspace exists **only** because this
-plugin declares it. The chain is short and every link is a hard gate:
-
-```
-handlers/effects.ts  SKILLS_RESOURCE                    ← the declaration
-main.ts              override readonly effects = …      ← mounted on the instance
-base/agent-plugin.ts defineAgent({ …, effects })        ← handed to the SDK
-SDK agent.ts         if (effects !== undefined) { declareEffectResource(…) }
-SDK plugin.ts        effectResources omitted from ora/register when the list is empty
-```
-
-Miss **any** of those and `ora/register` goes out with no `effectResources`
-field at all. From Ora's side this plugin does not consume Skills, so importing
-one succeeds, Ora has no Target to project it onto, nothing is written to disk,
-and no error is raised, logged, or shown anywhere.
-
-**When a Skill does not appear, check the declaration before debugging
-materialization.** The shipped bundle answers it in one command:
-
-```
-deno task build && grep -c skill dist/main.js
-```
-
-A `0` means the declaration never reached the package.
-
-### What the coordination calls have to promise
-
-Declaring a Resource is also a promise to make its mutation safe, and Ora will
-call all three methods:
-
-- **`coordinate`** must raise the new-turn barrier _before_ it waits for running
-  turns, not after. A check that only latched on an observed idle moment would
-  never find one in a Workspace whose prompts keep arriving; holding first makes
-  the set of turns to drain finite, so the wait terminates. It must also release
-  the barrier before failing — Ora only reactivates Targets whose coordination
-  succeeded, so an abandoned barrier holds its queued prompts for the life of
-  the process. The 10-second drain budget exists because Ora allows a plugin
-  control call 30 seconds and coordination holds that call open; it must finish
-  well inside that rather than wait out a prompt that may legitimately run for
-  minutes.
-- **`reactivate`** respawns the adapter. Restarting is deliberately chosen over
-  modelling when Claude Code rereads its Skill directory: a restart is correct
-  whether the adapter resolves Skills once at process start or per session.
-- **`verify_ready`** reports readiness by **returning**; a Consumer says "not
-  ready" by throwing. Returning a payload that says "not ready" would be
-  recorded as ready.
-- **Both coordination calls must be idempotent.** Ora retries them. The held
-  frame queue is the marker: a repeat `reactivate` finds nothing held — the
-  state a finished reactivation leaves behind — and must not restart an adapter
-  that already rescanned, which would tear down the sessions that came back from
-  the first restart.
-
-`SKILLS_RESOURCE.workspaceRelativePath` is `.claude/skills` — the
-project-relative directory Claude Code reads. Claude Code also reads a
-user-level `~/.claude/skills` directory, and declaring that would be a mistake:
-Ora fully owns what it materializes into a declared Resource, so it would
-reconcile away Skills another tool put there.
+Ora retired Workspace Effect materialization: the host injects installed Skills
+as a storage-path catalog in prompts and forwards readable Skill storage roots
+via ACP `session/new` and `session/load` (`additionalDirectories` when the
+bundled `claude-agent-acp` advertises
+`sessionCapabilities.additionalDirectories`, plus
+`_meta["ora/skillDirectories"]`). Because `handlers/acp.ts` pipes ACP frames
+verbatim between Ora and `claude-agent-acp` (and `claude-agent-acp` 0.110.1+
+natively advertises and forwards `additionalDirectories`), this plugin declares
+no `effects` or `effect/*` methods.
 
 ## What a package ships, and the two binaries in it
 
@@ -348,10 +295,9 @@ terminates process trees, and reclaims whatever a plugin generation left behind
 shim whose real child outlives a kill of the wrapper.
 
 `ClaudeClient` tracks generations: a process that is no longer `#running` was
-superseded by a later `start()` — an Effect restart, typically — so its exit
-must never clear the new process's tracking or fire `onExited`. The shared
-`#expectedExit` flag reflects the newer generation's intent by then, which is
-why the identity check comes first.
+superseded by a later `start()`, so its exit must never clear the new process's
+tracking or fire `onExited`. The shared `#expectedExit` flag reflects the newer
+generation's intent by then, which is why the identity check comes first.
 
 ## Platform model route
 
@@ -397,9 +343,8 @@ The route reaches Claude Code in two parts, split by who may read them:
 - A context frozen for another plugin id or another target triple, a token with
   a control character in it (a header cannot carry one), or a non-positive
   `maxTokens` is refused with `INVALID_PARAMS` before anything starts.
-- `ClaudeClient.useRoute` keeps the route for every later start, so an Effect
-  `reactivate` restart spawns the adapter on the same route. A running adapter
-  is already on its route, so `ClaudeClient.ready` is `running`.
+- `ClaudeClient.useRoute` keeps the route for every later `start()`. A running
+  adapter is already on its route, so `ClaudeClient.ready` is `running`.
 - Nothing is checked against the gateway at start: a gateway that is down fails
   the first turn, not `agent/start`.
 - Only the pair this package ships runs on a route. `spawnBundledClaude` asks
@@ -481,15 +426,13 @@ a start/stop cycle around a picker opening makes the next open pay full price.
   and takes the plugin down.
 - **ACP payloads are never parsed** on the bridge. Frames are re-framed between
   Ora's binary envelope and the adapter's NDJSON and otherwise passed through
-  verbatim — this is also what lets Claude Code's ACP extensions (session modes,
-  steering, its `_meta` capabilities) reach Ora without this plugin knowing they
-  exist. `handlers/effects.ts` is one exception, and a deliberately narrow one:
-  it reads `method` and `id` off the envelope to track turns, and never looks at
-  `params`; the platform model route above is the other.
+  verbatim — this is also what lets Claude Code's ACP extensions
+  (`additionalDirectories`, session modes, steering, its `_meta` capabilities)
+  reach Ora without this plugin knowing they exist; the platform model route
+  above is the only exception.
 - **Throw the right error code.** `AGENT_NOT_INSTALLED` (`-32001`) is retried
   quietly by Ora as expected local configuration; `AGENT_UNUSABLE` (`-32002`) is
-  reported once and not retried; `-32000` is how an Effect Consumer says "not
-  ready right now".
+  reported once and not retried.
 
 ## Logging
 
@@ -506,11 +449,11 @@ deactivation), `host-call` (every `agent/*` method with duration and outcome),
 `lifecycle`, `acp` (frame envelopes only — `method` and `id`, never `params`),
 `claude-client` (spawn, pid, exit, pipe failures), `claude-agent-acp` (the live
 adapter's own stderr, one record per line at `info`; nothing on a platform
-route, where `claude-client` records only a line count), `effects` (barrier,
-drain, restart, readiness), `models` and `acp-probe` (discovery; the probe
-adapter's stderr is `claude-agent-acp.probe` at `debug`), and `command` (which
-adapter was resolved and how). ACP payloads are never logged: a `session/prompt`
-carries the user's text, and the log has no business keeping it.
+route, where `claude-client` records only a line count), `models` and
+`acp-probe` (discovery; the probe adapter's stderr is `claude-agent-acp.probe`
+at `debug`), and `command` (which adapter was resolved and how). ACP payloads
+are never logged: a `session/prompt` carries the user's text, and the log has no
+business keeping it.
 
 ## Manifest
 
@@ -533,19 +476,18 @@ Ora parses and validates that table today but does not yet enforce it.
   the adapter) and network access to the npm registry; nothing else.
 - The SDK is imported from its published JSR package and pinned in `deno.json`;
   keep `deno.lock` synchronized when changing the SDK version — see the root
-  `../AGENTS.md` before bumping it, since the Effect API and process-ownership
-  API have changed shape across versions before.
+  `../AGENTS.md` before bumping it, since process-ownership APIs have changed
+  shape across versions before.
 - `deno task test` needs no CLI: discovery is exercised against a fake
-  `HostProcesses` that scripts an ACP peer, and effect coordination against a
+  `HostProcesses` that scripts an ACP peer, and `forwardAcpFrame` against a
   `ClaudeClient` with a scripted `spawn`. `deno task simulate` needs a real
   `claude-agent-acp` on PATH (`npm i -g @agentclientprotocol/claude-agent-acp`).
 - CI (`.github/workflows/ci.yml`) runs `check`, `lint` and `test` on every pull
   request and push to `main`; none of them needs a CLI.
-- One test reads `src/main.ts` as text to assert the effect wiring is present.
-  That is deliberate: the entrypoint calls `runAgentPlugin` at module scope, so
-  importing it would start serving the host, and the wiring it guards is exactly
-  the kind whose absence is invisible at runtime. Anything else `main.ts` would
-  decide belongs in a handler a test can call, as `agent/list_models` does.
+- One test reads `src/main.ts` and `src/base/agent-plugin.ts` as text to assert
+  retired `SkillEffectCoordinator` / `effect` wiring stays absent. Anything else
+  `main.ts` would decide belongs in a handler a test can call, as
+  `agent/list_models` does.
 - Bump `orax.toml` `version` before handing someone a `.orax` to import.
   `install_local` refuses a version that is already installed and never retires
   older ones, so reusing a number silently leaves the old code running. Keep

@@ -16,7 +16,7 @@ import {
  * before the install — is written through the SDK's logger, because `logger(...)` resolves its
  * parent on each call rather than binding it once.
  *
- * Targets name the component a record came from (`plugin`, `claude-client`, `effects`, ...) so a
+ * Targets name the component a record came from (`plugin`, `claude-client`, `acp`, ...) so a
  * filtered view of `plugin.log` can follow one of them; the host stamps identity and generation.
  */
 let root: PluginLogger = createLogger(createStderrLogSink());

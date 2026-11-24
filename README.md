@@ -44,12 +44,13 @@ Once installed, open Ora, and select **Claude Code** from the agent picker.
 Everything else — sessions, model selection, tool use — works the same as any
 other agent in Ora.
 
-## Project skills
+## Skills
 
-Claude Code looks for reusable [Skills](https://agentclientprotocol.com) in a
-`.claude/skills/<name>/SKILL.md` folder at the root of your project, alongside
-any skills installed globally on your machine. Add or edit files there and Ora
-takes care of getting Claude Code to pick them up — no manual restart needed.
+Ora delivers installed Skills to sessions through a storage-path catalog in
+prompts and passes readable Skill storage roots via ACP `additionalDirectories`
+when starting or loading sessions, so no files need to be copied into your
+project workspace. Claude Code also continues to read any user- or
+project-authored `.claude/skills` folders you maintain yourself.
 
 ## Configuration
 
