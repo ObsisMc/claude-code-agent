@@ -30,4 +30,8 @@ process.env.CLAUDE_CODE_EXECUTABLE = resolveClaudeCli({
   warn,
 }).path;
 
-await import("@agentclientprotocol/claude-agent-acp/dist/index.js");
+// By file path, not by package name: the adapter's `exports` map does not expose its entry point, and
+// a path import is not subject to it. Resolved from `dist/adapter`, where packaging copies this file.
+await import(
+  "./node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+);

@@ -88,9 +88,9 @@ Deno.test({
       let tree: ProcessView[] = [];
       await waitFor(() => {
         tree = processTree(adapterPid);
-        return tree.some((process) => process.argv[0] === CLI);
+        return tree.some(isSessionCli);
       }, 30_000);
-      const cli = tree.find((process) => process.argv[0] === CLI)!;
+      const cli = tree.find(isSessionCli)!;
 
       for (const process of tree) {
         assertEquals(
@@ -122,6 +122,14 @@ Deno.test({
 interface ProcessView {
   readonly argv: string[];
   readonly environ: string[];
+}
+
+/**
+ * Whether a process is the CLI running a session. The adapter also runs the same binary as
+ * `auth status --json`, which can appear first and need not carry the session's settings.
+ */
+function isSessionCli(process: ProcessView): boolean {
+  return process.argv[0] === CLI && process.argv.includes("--input-format");
 }
 
 /** The adapter and every process below it, read from `/proc`. */
