@@ -394,16 +394,23 @@ Deno.test("forwardAcpFrame pipes setup fields and prompts verbatim to the adapte
       _meta: { "ora/skillDirectories": ["/data/atoms/skills/review"] },
     },
   };
+  const load = {
+    ...setup,
+    id: 2,
+    method: "session/load",
+    params: { ...setup.params, sessionId: "existing", mcpServers: [] },
+  };
   const prompt = { jsonrpc: "2.0", id: 7, method: "session/prompt" };
 
   await forwardAcpFrame(client, setup);
+  await forwardAcpFrame(client, load);
   await forwardAcpFrame(client, prompt);
-  assertEquals(written, [setup, prompt]);
+  assertEquals(written, [setup, load, prompt]);
 
   await client.stop();
   const afterStop = { jsonrpc: "2.0", id: 10, method: "session/prompt" };
   await forwardAcpFrame(client, afterStop);
-  assertEquals(written, [setup, prompt]);
+  assertEquals(written, [setup, load, prompt]);
 });
 
 Deno.test("NDJSON reassembles frames split across chunks and CRLF", async () => {

@@ -46,11 +46,12 @@ other agent in Ora.
 
 ## Skills
 
-Ora delivers installed Skills to sessions through a storage-path catalog in
-prompts and passes readable Skill storage roots via ACP `additionalDirectories`
-when starting or loading sessions, so no files need to be copied into your
-project workspace. Claude Code also continues to read any user- or
-project-authored `.claude/skills` folders you maintain yourself.
+On Ora Desktop versions that support storage-path Skill catalogs, Ora lists
+installed Skills in prompts and passes readable Skill storage roots via ACP
+`additionalDirectories` when starting or loading sessions. This plugin version
+no longer delivers Ora-installed Skills on older Desktop versions that still use
+Effects. Claude Code continues to read user- and project-authored
+`.claude/skills` folders.
 
 ## Configuration
 
