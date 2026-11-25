@@ -1,53 +1,53 @@
 {
   "adapter": {
     "name": "@agentclientprotocol/claude-agent-acp",
-    "version": "0.110.1",
-    "integrity": "sha512-zIPjFWEU4yit7NHSMFk3W8Coh05GP+S5YLMXZB+t4YF+oQMfxRS+WXWSKnUgWPMsS0BUQnEHTurAgHsgWBiHPQ==",
-    "tarball": "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.110.1.tgz"
+    "version": "0.112.0",
+    "integrity": "sha512-T9FrKGd9eDKHNmZE/EfEf01v49UHKeKyGcu91O8sdVc7a9eMEDOGWT/0moWirGHJdBqJ9qPVfqu07IBegJuniA==",
+    "tarball": "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.112.0.tgz"
   },
   "agentSdk": {
     "name": "@anthropic-ai/claude-agent-sdk",
-    "version": "0.3.330",
-    "integrity": "sha512-7om9Xus6tfkeCUCfzg6ilJuN6Z7okkEvJ0mx+ukXa/Id5U/6BGtPkOYni+3ebedwa3b9SVF7A05+ln+/9EoU/w==",
-    "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.330.tgz",
-    "claudeVersion": "2.1.330"
+    "version": "0.3.331",
+    "integrity": "sha512-ml/MPqgO95tG5zcApBFxEyoDk57d9htP09R8AtPbKPUCHpsobf84IjkN4zhGvQgk8zsA9dXoeMGrQcCc8gQE/w==",
+    "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.331.tgz",
+    "claudeVersion": "2.1.331"
   },
   "platforms": {
     "win32-x64": {
       "name": "@anthropic-ai/claude-agent-sdk-win32-x64",
-      "version": "0.3.330",
-      "integrity": "sha512-ooThWbUXlXKTDgj2VgWBXQ/6vSOTaAbBDWPvvCGNHi20haoSkw4uPX9gczkX+HJuVTslvvLiYIfe8zleVPzi7A==",
-      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-win32-x64/-/claude-agent-sdk-win32-x64-0.3.330.tgz",
+      "version": "0.3.331",
+      "integrity": "sha512-AsLur4ov9MGTQTrnZ49ZDPasQ35U3X/rZDdF/rPhytN3h1F3w/0IkC6esW3OzldvPlci60QvggOLVGnFlUzdxw==",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-win32-x64/-/claude-agent-sdk-win32-x64-0.3.331.tgz",
       "binary": "claude.exe",
-      "size": 387754656,
-      "sha256": "fa797c1bc7d4a3511da42622bae53a2b7f1276ae328c668f2bfef44635301caa"
+      "size": 405798560,
+      "sha256": "db6a1c2506ce797e842028fb75f38f023a712ccbf9322497652510f0a179c806"
     },
     "darwin-arm64": {
       "name": "@anthropic-ai/claude-agent-sdk-darwin-arm64",
-      "version": "0.3.330",
-      "integrity": "sha512-J9nqvcfD2V90O5uoR8At66R51VYtSMKnxSmPc0S4A4F5oX1VbokcpJLXU1yVCOuTtzr/OIHjRr9nn2vKi/S6rQ==",
-      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-darwin-arm64/-/claude-agent-sdk-darwin-arm64-0.3.330.tgz",
+      "version": "0.3.331",
+      "integrity": "sha512-PQrn7YTiSV5Bg+ueF2hNvswc+wI7YKC2c32XNedvs6vfMCUUnIlq93VEbZiRY23b+JIVkEm8gb1VhkJTjsYISQ==",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-darwin-arm64/-/claude-agent-sdk-darwin-arm64-0.3.331.tgz",
       "binary": "claude",
-      "size": 363855808,
-      "sha256": "f7c5093b9dd6560d08af28bc27b123fb55091deae3180ac39df199522da86815"
+      "size": 381464176,
+      "sha256": "4874591dc39bff1188921b82cbeb8a44e3a33b0f92c888b3d43639b9344101f7"
     },
     "linux-x64": {
       "name": "@anthropic-ai/claude-agent-sdk-linux-x64",
-      "version": "0.3.330",
-      "integrity": "sha512-9w4uMdA3vNZXocwOUhivOGotXoRDxN/C/xPMkZMY9WPpKLAlj8upMZskNgPjQKlVRXhxPfNagcBijGPUH4WepA==",
-      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.330.tgz",
+      "version": "0.3.331",
+      "integrity": "sha512-nfHSiLJdkpsVAFsXTriyW3r64gS1sp5zxvaoF2dmNqKixR4rf9ISDDi81gF9L1uk/bAEcBGRx34U6Itw+NYIEg==",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.331.tgz",
       "binary": "claude",
-      "size": 381121040,
-      "sha256": "f390eaa0814e6a1bff74cbb47acb74cb9c89d30ced809fe0af5af00c7bfe8ebb"
+      "size": 398622992,
+      "sha256": "4c00839cf46beb2b38ec310105f2d538f7f9321fe46c636299b74bcab94626b1"
     },
     "linux-arm64": {
       "name": "@anthropic-ai/claude-agent-sdk-linux-arm64",
-      "version": "0.3.330",
-      "integrity": "sha512-2Q+kfzaoTvJv1rsyu+iR4UHDZ3nxiOfdXISk+2ydQShU9DqXNlgQAt3BdJMh0Yx4MrxB66TMphVvVQeRslwwhA==",
-      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-arm64/-/claude-agent-sdk-linux-arm64-0.3.330.tgz",
+      "version": "0.3.331",
+      "integrity": "sha512-xiRxBxoM8Qa5fnjCFk5iFheL5GUroLuHPJ7UnD4v2Sv1tWxGoSL67AYnMZ6OdjMguZK09X4WlgOn1nL1m6NEOA==",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-arm64/-/claude-agent-sdk-linux-arm64-0.3.331.tgz",
       "binary": "claude",
-      "size": 379971000,
-      "sha256": "6016f90cac783e367fb1aa97c768a2efb94a0128a5b46b70fb3d8fcbbd9dd444"
+      "size": 397534392,
+      "sha256": "3e5afea76cf6ed53f42076d8b175c4ee3d9ab34cd9b90452da115d21ad0d5d31"
     }
   }
 }
