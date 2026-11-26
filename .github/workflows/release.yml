@@ -78,6 +78,13 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: deno task package --tag "$TAG" --repo "${{ github.repository }}" --agent-configuration
 
+      # Both release paths end here — a maintainer's tag and the nightly `upstream.yml` bump — so
+      # a requirement users must read is written into these notes rather than into a Release by
+      # hand: the next automatic release would drop it. The Desktop floor is permanent for this
+      # plugin: it declares no Skill Effect, so Skills reach Claude Code only through the storage
+      # roots a Desktop passes over ACP `additionalDirectories`, and a Desktop older than
+      # desktop#827 still expects the Effect declaration — it installs the plugin and silently
+      # delivers no Skills.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -90,6 +97,9 @@ jobs:
             printf 'Bundles `claude-agent-acp` %s with Claude Code %s.\n\n' "$ADAPTER" "$CLAUDE"
             printf 'Each `.orax` carries both binaries and installs only on the target it was '
             printf 'built for. `manifest.toml` is the release form the marketplace index reads.\n'
+            printf '\nRequires Ora Desktop ≥ the first stable release that includes '
+            printf 'ora-space/desktop#827 (commit `9f3ed63f`). On older Desktop builds this '
+            printf 'plugin delivers no Skills — upgrade Desktop first.\n'
           } > notes.md
           ASSETS=(dist/packages/*.orax dist/manifest.toml)
           # The static declaration copy only exists when the release bound one.
