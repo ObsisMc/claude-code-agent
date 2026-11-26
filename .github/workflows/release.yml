@@ -97,8 +97,8 @@ jobs:
             printf 'Bundles `claude-agent-acp` %s with Claude Code %s.\n\n' "$ADAPTER" "$CLAUDE"
             printf 'Each `.orax` carries both binaries and installs only on the target it was '
             printf 'built for. `manifest.toml` is the release form the marketplace index reads.\n'
-            printf '\nRequires Ora Desktop ≥ the first stable release that includes '
-            printf 'ora-space/desktop#827 (commit `9f3ed63f`). On older Desktop builds this '
+            printf '\nRequires Ora Desktop ≥ 0.7.0 (the first stable release that includes '
+            printf 'ora-space/desktop#827, commit `9f3ed63f`). On older Desktop builds this '
             printf 'plugin delivers no Skills — upgrade Desktop first.\n'
           } > notes.md
           ASSETS=(dist/packages/*.orax dist/manifest.toml)
