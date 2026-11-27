@@ -345,7 +345,7 @@ Deno.test("an answer expires after five minutes", async () => {
   }
 });
 
-Deno.test("starting or stopping the agent drops its workspace's answers", async () => {
+Deno.test("invalidating a workspace drops only its answers, and start and stop call it", async () => {
   const spawns: HostChildProcessOptions[] = [];
   const processes = fakeProcesses(defaultAcpAgent, spawns, {
     after: commandReport([]),
@@ -417,6 +417,36 @@ Deno.test("a quick models-only probe whose delete hangs answers within the clean
   assertEquals(discovery.models.length, 3);
   assertEquals(Date.now() - started < AGENT_DISCOVERY_CLEANUP_RESERVE_MS, true);
   assertEquals(kills.count, 1);
+});
+
+Deno.test("an adapter that exits during the wait ends it at once", async () => {
+  const started = Date.now();
+  const discovery = await discoverClaude(
+    fakeProcesses(defaultAcpAgent, [], { exitAfterSessionNew: true }),
+    withCommands(uniqueWorkspace()),
+  );
+  // Commands are unknown, and the two-second cap was not waited out.
+  assertEquals("commands" in discovery, false);
+  assertEquals(discovery.models.length, 3);
+  assertEquals(Date.now() - started < 1_000, true);
+});
+
+Deno.test("the handshake leaves the cleanup reserve untouched", async () => {
+  const started = Date.now();
+  const deadline = started + AGENT_DISCOVERY_CLEANUP_RESERVE_MS + 300;
+  await assertRejects(() =>
+    discoverClaude(
+      fakeProcesses((request): JsonValue | Scripted =>
+        request.method === "initialize" ? NO_ANSWER : defaultAcpAgent(request)
+      ),
+      withCommands(uniqueWorkspace(), { deadline }),
+    )
+  );
+  // It gave up where the reserve begins, not at Ora's deadline.
+  assertEquals(
+    Date.now() < deadline - AGENT_DISCOVERY_CLEANUP_RESERVE_MS / 2,
+    true,
+  );
 });
 
 /** A `session/new` answer without the id of the session it opened. */
@@ -513,6 +543,8 @@ function fakeProcesses(
     afterDelayMs?: number;
     /** Counts the probe processes ended. */
     kills?: { count: number };
+    /** The adapter exits shortly after it answers `session/new`. */
+    exitAfterSessionNew?: boolean;
   } = {},
 ): HostProcesses {
   return {
@@ -562,6 +594,15 @@ function fakeProcesses(
                   result: answer as JsonValue,
                 },
             );
+            if (opensSession && notifications.exitAfterSessionNew) {
+              // Shortly after the answer has been read, as a crash during the wait would.
+              setTimeout(() => {
+                open = false;
+                stdout?.close();
+                ended?.();
+              }, 20);
+              continue;
+            }
             const after = notifications.after;
             if (opensSession && after !== undefined) {
               if (notifications.afterDelayMs === undefined) {

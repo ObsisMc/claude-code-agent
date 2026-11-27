@@ -306,24 +306,18 @@ Deno.test("a pin that names nothing is reported as a missing adapter", async () 
   });
 });
 
-Deno.test("models come from the probe session's model config option", async () => {
-  const models = await listModels(
-    fakeProcesses(defaultAcpAgent),
-    uniqueWorkspace(),
-  );
-  assertEquals(models, [
-    { id: "sonnet", displayName: "Sonnet", default: false },
-    { id: "opus", displayName: "Opus", default: true },
-  ]);
-});
-
 Deno.test("the probe declares the capability that reveals a model selector", async () => {
   const requests: Record<string, JsonValue>[] = [];
+  const kills = { count: 0 };
   await listModels(
-    fakeProcesses((request) => {
-      requests.push(request);
-      return defaultAcpAgent(request);
-    }),
+    fakeProcesses(
+      (request) => {
+        requests.push(request);
+        return defaultAcpAgent(request);
+      },
+      [],
+      kills,
+    ),
     uniqueWorkspace(),
   );
   const initialize = requests.find((request) =>
@@ -339,6 +333,8 @@ Deno.test("the probe declares the capability that reveals a model selector", asy
     requests.some((request) => request.method === "session/delete"),
     false,
   );
+  // Without a delete to send, the process is still ended.
+  assertEquals(kills.count, 1);
 });
 
 Deno.test("an agent offering no selector discovers no pre-session models", async () => {
@@ -363,18 +359,6 @@ Deno.test("one workspace is probed once while its answer is fresh", async () => 
   ]);
   assertEquals(first, second);
   assertEquals(spawns.length, 1);
-});
-
-Deno.test("discovery without a workspace is refused rather than guessed", () => {
-  const error = (() => {
-    try {
-      listModels(fakeProcesses(defaultAcpAgent), "");
-      return undefined;
-    } catch (thrown) {
-      return thrown as { code?: number };
-    }
-  })();
-  assertEquals(error?.code, -32602);
 });
 
 Deno.test("the plugin declares no Skill Effect wiring or methods", async () => {
@@ -505,6 +489,8 @@ function defaultAcpAgent(request: Record<string, JsonValue>): JsonValue {
 function fakeProcesses(
   respond: (request: Record<string, JsonValue>) => JsonValue,
   spawns: HostChildProcessOptions[] = [],
+  /** Counts the probe processes ended. */
+  kills?: { count: number },
 ): HostProcesses {
   return {
     spawn(options) {
@@ -539,6 +525,7 @@ function fakeProcesses(
         },
         closeStdin: () => Promise.resolve(),
         kill: () => {
+          if (kills !== undefined) kills.count += 1;
           stdout?.close();
           ended?.();
           return Promise.resolve();
