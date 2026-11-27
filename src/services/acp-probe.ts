@@ -23,11 +23,63 @@ interface PendingCall {
   reject: (error: Error) => void;
 }
 
-/** One notification the caller is waiting for, until the conversation ends. */
-interface NotificationWatch {
-  matches: (params: JsonValue) => boolean;
+/** One caller waiting in a {@link NotificationRecord} for a notification it has not seen yet. */
+interface NotificationWait {
+  which: (params: JsonValue) => boolean;
   resolve: (params: JsonValue) => void;
   reject: (error: Error) => void;
+}
+
+/**
+ * The notifications of one kind a probe has received since the record began, kept until asked.
+ *
+ * Kept rather than handed to a single waiter, because which one is wanted may only be known later:
+ * an agent can report on a session before it answers the `session/new` that names the session.
+ */
+export class NotificationRecord {
+  readonly #seen: JsonValue[] = [];
+  readonly #waits = new Set<NotificationWait>();
+  #ended: Error | undefined;
+
+  constructor(readonly matches: (params: JsonValue) => boolean) {}
+
+  /**
+   * Resolves with the first recorded notification `which` accepts, already received or still to
+   * come. It rejects once the conversation ends without one.
+   */
+  first(which: (params: JsonValue) => boolean): Promise<JsonValue> {
+    const seen = this.#seen.find(which);
+    if (seen !== undefined) {
+      return Promise.resolve(seen);
+    }
+    if (this.#ended !== undefined) {
+      return Promise.reject(this.#ended);
+    }
+    return new Promise((resolve, reject) => {
+      this.#waits.add({ which, resolve, reject });
+    });
+  }
+
+  /** Keeps one notification and hands it to whoever was waiting for one like it. */
+  add(params: JsonValue): void {
+    this.#seen.push(params);
+    for (const wait of [...this.#waits]) {
+      if (wait.which(params)) {
+        this.#waits.delete(wait);
+        wait.resolve(params);
+      }
+    }
+  }
+
+  /** Fails every wait still open; what was already recorded can still be asked for. */
+  end(error: Error): void {
+    this.#ended ??= error;
+    const waits = [...this.#waits];
+    this.#waits.clear();
+    for (const wait of waits) {
+      wait.reject(error);
+    }
+  }
 }
 
 /** A probe conversation that ended without the answer it asked for. */
@@ -55,7 +107,7 @@ export class AcpProbeError extends Error {
 export class AcpProbe {
   readonly #child: HostChildProcess;
   readonly #pending = new Map<number, PendingCall>();
-  readonly #watches = new Set<NotificationWatch>();
+  readonly #records = new Set<NotificationRecord>();
   readonly #deadline: number;
   #nextId = 1;
   /** Set once the adapter can no longer answer, so later calls fail instead of waiting forever. */
@@ -119,18 +171,19 @@ export class AcpProbe {
   }
 
   /**
-   * Resolves with the params of the first notification `matches` accepts from now on.
+   * Starts keeping every notification `matches` accepts, from now until the conversation ends.
    *
-   * Watch before sending the request that provokes it: an agent may notify before it answers. It
-   * rejects once the conversation ends without one, and is never resolved by a response.
+   * Start it before sending the request that provokes them: an agent may notify before it answers.
+   * Responses are never recorded.
    */
-  notification(matches: (params: JsonValue) => boolean): Promise<JsonValue> {
+  record(matches: (params: JsonValue) => boolean): NotificationRecord {
+    const record = new NotificationRecord(matches);
     if (this.#ended !== undefined) {
-      return Promise.reject(this.#ended);
+      record.end(this.#ended);
+    } else {
+      this.#records.add(record);
     }
-    return new Promise((resolve, reject) => {
-      this.#watches.add({ matches, resolve, reject });
-    });
+    return record;
   }
 
   /** Kills the probed process; idempotent, and safe on one that already exited. */
@@ -204,12 +257,11 @@ export class AcpProbe {
     call.resolve(frame.result ?? null);
   }
 
-  /** Hands one notification to every watch it matches; each watch takes only its first. */
+  /** Hands one notification to every record that keeps its kind. */
   #notify(params: JsonValue): void {
-    for (const watch of [...this.#watches]) {
-      if (watch.matches(params)) {
-        this.#watches.delete(watch);
-        watch.resolve(params);
+    for (const record of this.#records) {
+      if (record.matches(params)) {
+        record.add(params);
       }
     }
   }
@@ -285,11 +337,10 @@ export class AcpProbe {
     for (const call of pending) {
       call.reject(this.#ended);
     }
-    const watches = [...this.#watches];
-    this.#watches.clear();
-    for (const watch of watches) {
-      watch.reject(this.#ended);
+    for (const record of this.#records) {
+      record.end(this.#ended);
     }
+    this.#records.clear();
   }
 }
 

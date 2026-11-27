@@ -34,6 +34,14 @@ const ACP_PROTOCOL_VERSION = 1;
  */
 const CATALOG_TTL_MS = 5 * 60_000;
 
+/**
+ * How long before the end of the cleanup window `session/delete` stops being waited for.
+ *
+ * Killing the adapter is a host round trip of its own that runs after the delete, and the answer
+ * still has to reach Ora before its deadline; a delete that never answers must not take that time.
+ */
+const KILL_MARGIN_MS = 1_000;
+
 /** One discovery's in-flight or recent answer. */
 interface CachedDiscovery {
   discovery: Promise<AgentDiscovery>;
@@ -195,7 +203,8 @@ function discoveryKey(context: AgentDiscoveryContext): string {
  * real one would get, and without MCP servers.
  *
  * The probe session is deleted when the adapter says it can be, inside the cleanup reserve the
- * handshake and the wait leave, and the process is killed either way.
+ * handshake and the wait leave and ending a kill margin before Ora's deadline, and the process is
+ * killed either way.
  *
  * Failures propagate. Ora treats a failed discovery as a failed discovery rather than a failed
  * agent, so reporting one is cheap and honest, while answering with no models would make an
@@ -221,12 +230,9 @@ async function runProbe(
     ),
   );
   try {
-    // Watched before `session/new` is sent: a report that arrives ahead of its answer counts.
-    const report = includeCommands
-      ? probe.notification(isCommandReport)
-      : undefined;
-    // Ending the probe rejects a report nobody waited for; that is not an error worth surfacing.
-    void report?.catch(() => {});
+    // Recorded before `session/new` is sent: a report that arrives ahead of its answer counts,
+    // though which session it must be about is only known once the answer names it.
+    const reports = includeCommands ? probe.record(isCommandReport) : undefined;
     const initialized = await probe.request("initialize", {
       protocolVersion: ACP_PROTOCOL_VERSION,
       // An agent only reports config options to a client that advertises them, so this one
@@ -243,10 +249,29 @@ async function runProbe(
       ),
     });
     const models = modelsFrom(configOptionsOf(session));
-    const commands = report === undefined
+    const sessionId = readString(session, "sessionId");
+    // Only the probe session's own first report counts; an answer that names no session has no
+    // report to wait for.
+    const commands = reports === undefined || sessionId === undefined
       ? undefined
-      : commandsFrom(await waitForAgentCommands(context, report));
-    await deleteProbeSession(probe, initialized, session, context.deadline);
+      : commandsFrom(
+        await waitForAgentCommands(
+          context,
+          reports.first((params) =>
+            readString(params, "sessionId") === sessionId
+          ),
+        ),
+      );
+    await deleteProbeSession(
+      probe,
+      initialized,
+      session,
+      // Never past the reserve, and never so late that the kill and the answer miss Ora's deadline.
+      Math.min(
+        context.deadline,
+        Date.now() + AGENT_DISCOVERY_CLEANUP_RESERVE_MS,
+      ) - KILL_MARGIN_MS,
+    );
     return commands === undefined ? { models } : { models, commands };
   } finally {
     await probe.close();
@@ -321,7 +346,6 @@ async function deleteProbeSession(
     return;
   }
   try {
-    // The cleanup reserve before Ora's deadline is this request's to use.
     await probe.request("session/delete", { sessionId }, deadline);
   } catch (error) {
     log.debug("probe session was not deleted", {
