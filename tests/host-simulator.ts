@@ -338,7 +338,14 @@ const register = await waitFor(
   "ora/register",
 );
 const registration = register.params as { methods: string[]; emits: string[] };
-for (const method of ["agent/start", "agent/stop", "agent/list_models"]) {
+for (
+  const method of [
+    "agent/start",
+    "agent/stop",
+    "agent/discover",
+    "agent/list_models",
+  ]
+) {
   check(registration.methods.includes(method), `registers ${method}`);
 }
 check(registration.emits.includes("agent/acp"), "emits agent/acp");
@@ -431,34 +438,52 @@ console.log(
 // Discovery names the Workspace it is answering for, and the plugin answers it by running a
 // second, one-shot `claude-agent-acp` through this simulator rather than by borrowing the
 // connection opened above — so this step also proves the live bridge survives a probe running
-// beside it.
+// beside it. It asks for commands too, the way a chat surface does, with no Skills.
 await send({
   jsonrpc: "2.0",
   id: 2,
-  method: "agent/list_models",
-  params: { cwd: Deno.cwd() },
+  method: "agent/discover",
+  params: {
+    cwd: Deno.cwd(),
+    includeCommands: true,
+    deadline: Date.now() + 60_000,
+    skills: { readRoots: [], directories: [], revision: "0" },
+  },
 });
-const models = await waitFor(
+const discovered = await waitFor(
   (message) => message.id === 2,
-  "agent/list_models",
+  "agent/discover",
 );
 check(
-  models.error === undefined,
-  `agent/list_models answered without an error (${
-    JSON.stringify(models.error)
+  discovered.error === undefined,
+  `agent/discover answered without an error (${
+    JSON.stringify(discovered.error)
   })`,
 );
-const modelList = ((models.result ?? {}) as { models?: unknown[] }).models;
-check(Array.isArray(modelList), "agent/list_models returns a model array");
+const discovery = (discovered.result ?? {}) as {
+  models?: unknown[];
+  commands?: unknown[];
+};
+const modelList = discovery.models;
+check(Array.isArray(modelList), "agent/discover returns a model array");
 // The pre-session list and the in-session picker read one source, so discovery must reproduce the
 // choices the ACP session above already advertised.
 check(
   modelList.length === (modelOption.options?.length ?? 0),
   "discovery reports the same models as the ACP session config option",
 );
+// Absent commands mean the adapter sent no report in time; an empty list means it said it has none.
 console.log(
-  `ok: list_models ${modelList.length} models via a probe session, first ${
+  `ok: discover ${modelList.length} models via a probe session, first ${
     JSON.stringify(modelList[0])
+  }; commands ${
+    discovery.commands === undefined
+      ? "unknown (no report in time)"
+      : JSON.stringify(
+        discovery.commands.map((command) =>
+          (command as { name?: unknown }).name
+        ),
+      )
   }`,
 );
 

@@ -7,7 +7,7 @@ import type {
 } from "@ora-space/plugin-sdk";
 import { AGENT_NOT_INSTALLED, HostRequestError } from "@ora-space/plugin-sdk";
 import { forwardAcpFrame } from "../src/handlers/acp.ts";
-import { listClaudeModels } from "../src/handlers/models.ts";
+import { discoverClaude } from "../src/handlers/discovery.ts";
 import { BIN_ENV_VAR, resolveClaudeCommands } from "../src/services/command.ts";
 import {
   bundledAdapterPath,
@@ -24,6 +24,15 @@ import {
   type SpawnedProcess,
 } from "../src/services/claude-client.ts";
 import { decodeLines } from "../src/services/ndjson.ts";
+
+/** Discovers models only, as `agent/list_models` asks, and answers just them. */
+function listModels(processes: HostProcesses, cwd: string) {
+  return discoverClaude(processes, {
+    cwd,
+    includeCommands: false,
+    deadline: Date.now() + 30_000,
+  }).then(({ models }) => models);
+}
 
 Deno.test("ora-space.claude declares an agent kind", async () => {
   const manifest = await Deno.readTextFile(
@@ -228,7 +237,7 @@ Deno.test("both bundled binaries land where each consumer looks for them", () =>
 
 Deno.test("the bundled adapter is asked for before anything on PATH", async () => {
   const spawns: HostChildProcessOptions[] = [];
-  await listClaudeModels(
+  await listModels(
     fakeProcesses(defaultAcpAgent, spawns),
     uniqueWorkspace(),
   );
@@ -265,7 +274,7 @@ Deno.test("the compiled adapter never honours an inherited CLAUDE_CODE_EXECUTABL
 Deno.test("a pinned binary is the only program spawned", async () => {
   const spawns: HostChildProcessOptions[] = [];
   await withPinnedBinary("C:\\tools\\claude-agent-acp.exe", async () => {
-    await listClaudeModels(
+    await listModels(
       fakeProcesses(defaultAcpAgent, spawns),
       uniqueWorkspace(),
     );
@@ -289,7 +298,7 @@ Deno.test("a pin that names nothing is reported as a missing adapter", async () 
   };
   await withPinnedBinary("C:\\tools\\absent.exe", async () => {
     const error = await assertRejects(() =>
-      listClaudeModels(missing, uniqueWorkspace())
+      listModels(missing, uniqueWorkspace())
     );
     // Ora retries this code quietly as expected local configuration rather than faulting the
     // agent, which is the whole difference between "not installed" and "broken".
@@ -298,7 +307,7 @@ Deno.test("a pin that names nothing is reported as a missing adapter", async () 
 });
 
 Deno.test("models come from the probe session's model config option", async () => {
-  const models = await listClaudeModels(
+  const models = await listModels(
     fakeProcesses(defaultAcpAgent),
     uniqueWorkspace(),
   );
@@ -310,7 +319,7 @@ Deno.test("models come from the probe session's model config option", async () =
 
 Deno.test("the probe declares the capability that reveals a model selector", async () => {
   const requests: Record<string, JsonValue>[] = [];
-  await listClaudeModels(
+  await listModels(
     fakeProcesses((request) => {
       requests.push(request);
       return defaultAcpAgent(request);
@@ -333,7 +342,7 @@ Deno.test("the probe declares the capability that reveals a model selector", asy
 });
 
 Deno.test("an agent offering no selector discovers no pre-session models", async () => {
-  const models = await listClaudeModels(
+  const models = await listModels(
     fakeProcesses((request) =>
       request.method === "session/new"
         ? { sessionId: "s1", configOptions: [] }
@@ -349,8 +358,8 @@ Deno.test("one workspace is probed once while its answer is fresh", async () => 
   const processes = fakeProcesses(defaultAcpAgent, spawns);
   const cwd = uniqueWorkspace();
   const [first, second] = await Promise.all([
-    listClaudeModels(processes, cwd),
-    listClaudeModels(processes, cwd),
+    listModels(processes, cwd),
+    listModels(processes, cwd),
   ]);
   assertEquals(first, second);
   assertEquals(spawns.length, 1);
@@ -359,7 +368,7 @@ Deno.test("one workspace is probed once while its answer is fresh", async () => 
 Deno.test("discovery without a workspace is refused rather than guessed", () => {
   const error = (() => {
     try {
-      listClaudeModels(fakeProcesses(defaultAcpAgent), "");
+      listModels(fakeProcesses(defaultAcpAgent), "");
       return undefined;
     } catch (thrown) {
       return thrown as { code?: number };

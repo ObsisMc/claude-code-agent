@@ -1,7 +1,8 @@
 import {
   type AcpSender,
   AGENT_METHODS,
-  type AgentModel,
+  type AgentDiscovery,
+  type AgentDiscoveryContext,
   type AgentModelApplied,
   type AgentStartContext,
   createHostProcesses,
@@ -34,27 +35,17 @@ export interface RunAgentPluginOptions {
 }
 
 /**
- * Names the Workspace one model discovery call is answering for.
- *
- * Discovery happens outside any session, so this directory is the only thing telling a plugin
- * which project it is being asked about — a catalog that depends on the project's own
- * configuration cannot be resolved without it.
- */
-export interface AgentListModelsContext {
-  readonly cwd: string;
-}
-
-/**
  * Maps every class method onto the JSON-RPC method the Ora host invokes.
  *
  * The host contract fixes the wire names, so the mapping is explicit rather than derived from the
- * method name: a plugin that renamed `onListModels` would otherwise silently stop serving
- * `agent/list_models`.
+ * method name: a plugin that renamed `onDiscover` would otherwise silently stop serving
+ * `agent/discover`. The SDK serves `agent/list_models` from the same method for hosts that only
+ * know that name.
  */
 export const AGENT_METHOD_ROUTES = {
   onStart: AGENT_METHODS.start,
   onStop: AGENT_METHODS.stop,
-  onListModels: AGENT_METHODS.listModels,
+  onDiscover: AGENT_METHODS.discover,
 } as const;
 
 /** Maps the class method that consumes host notifications onto its wire name. */
@@ -100,10 +91,13 @@ export abstract class AgentPlugin {
   /** [agent/acp] Receives one ACP frame the host is forwarding to the agent. */
   abstract onAcp(frame: JsonValue): void | Promise<void>;
 
-  /** [agent/list_models] Lists the models selectable in one Workspace before any session exists. */
-  abstract onListModels(
-    context: AgentListModelsContext,
-  ): AgentModel[] | Promise<AgentModel[]>;
+  /**
+   * [agent/discover] Reports the models selectable in one Workspace before any session exists, and
+   * the agent's commands when the caller wants them.
+   */
+  abstract onDiscover(
+    context: AgentDiscoveryContext,
+  ): AgentDiscovery | Promise<AgentDiscovery>;
 
   // ------------------------- optional agent contract ---------------------------
 
@@ -146,13 +140,13 @@ export async function runAgentPlugin(
         () =>
           invoke(routes, AGENT_METHOD_ROUTES.onStop) as void | Promise<void>,
       ),
-    listModels: (context) =>
+    discover: (context) =>
       traced(
-        AGENT_METHOD_ROUTES.onListModels,
+        AGENT_METHOD_ROUTES.onDiscover,
         () =>
-          invoke(routes, AGENT_METHOD_ROUTES.onListModels, context) as
-            | AgentModel[]
-            | Promise<AgentModel[]>,
+          invoke(routes, AGENT_METHOD_ROUTES.onDiscover, context) as
+            | AgentDiscovery
+            | Promise<AgentDiscovery>,
       ),
     onAcp: (frame) =>
       invoke(routes, AGENT_NOTIFICATION_ROUTES.onAcp, frame) as

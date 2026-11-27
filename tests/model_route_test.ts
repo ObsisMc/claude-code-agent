@@ -12,7 +12,7 @@ import {
   type JsonValue,
 } from "@ora-space/plugin-sdk";
 import { startClaude } from "../src/handlers/lifecycle.ts";
-import { listAgentModels } from "../src/handlers/models.ts";
+import { discoverAgent } from "../src/handlers/discovery.ts";
 import {
   ClaudeClient,
   type SpawnedProcess,
@@ -595,14 +595,31 @@ Deno.test("model discovery on a platform route answers the frozen model without 
       return Promise.reject(new Error("a probe must not start"));
     },
   };
-  assertEquals(await listAgentModels(client, processes, "/workspace"), [
-    { id: "team/claude", displayName: "Team Claude", default: true },
-  ]);
+  // Commands are wanted, yet a platform route has none to offer without a probe.
+  assertEquals(
+    await discoverAgent(client, processes, {
+      cwd: "/workspace",
+      includeCommands: true,
+      deadline: Date.now() + 30_000,
+    }),
+    {
+      models: [{
+        id: "team/claude",
+        displayName: "Team Claude",
+        default: true,
+      }],
+    },
+  );
   assertEquals(spawns, []);
   await client.stop();
   // Without a route the same call is discovery, which needs the host's processes.
   assertThrows(
-    () => listAgentModels(new ClaudeClient(), undefined, "/workspace"),
+    () =>
+      discoverAgent(new ClaudeClient(), undefined, {
+        cwd: "/workspace",
+        includeCommands: false,
+        deadline: Date.now() + 30_000,
+      }),
     Error,
     "before activation",
   );

@@ -1,13 +1,13 @@
 import type {
   AcpSender,
-  AgentModel,
+  AgentDiscovery,
+  AgentDiscoveryContext,
   AgentModelApplied,
   AgentStartContext,
   HostProcesses,
   JsonValue,
 } from "@ora-space/plugin-sdk";
 import {
-  type AgentListModelsContext,
   AgentPlugin,
   type PluginContext,
   runAgentPlugin,
@@ -15,10 +15,10 @@ import {
 import { forwardAcpFrame } from "./handlers/acp.ts";
 import { startClaude, stopClaude } from "./handlers/lifecycle.ts";
 import {
-  invalidateAllClaudeModels,
-  invalidateClaudeModels,
-  listAgentModels,
-} from "./handlers/models.ts";
+  discoverAgent,
+  invalidateAllClaudeDiscovery,
+  invalidateClaudeDiscovery,
+} from "./handlers/discovery.ts";
 import { ClaudeClient } from "./services/claude-client.ts";
 import { logger } from "./services/log.ts";
 import { PLUGIN_ID } from "./services/model-route.ts";
@@ -64,7 +64,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
     },
     onExited: () => {
       if (this.#cwd !== undefined) {
-        invalidateClaudeModels(this.#cwd);
+        invalidateClaudeDiscovery(this.#cwd);
       }
       this.#log.warn(
         "the Claude ACP adapter exited on its own; Ora decides whether to reconnect",
@@ -89,26 +89,26 @@ class ClaudeAgentPlugin extends AgentPlugin {
       context: { cwd: context.cwd, previousCwd: this.#cwd },
     });
     if (this.#cwd !== undefined) {
-      invalidateClaudeModels(this.#cwd);
+      invalidateClaudeDiscovery(this.#cwd);
     }
     this.#send = send;
     this.#cwd = context.cwd;
-    invalidateClaudeModels(context.cwd);
+    invalidateClaudeDiscovery(context.cwd);
     return await startClaude(this.#client, context);
   };
 
   override onStop = async (): Promise<void> => {
     this.#log.info("agent stop requested", { context: { cwd: this.#cwd } });
     if (this.#cwd !== undefined) {
-      invalidateClaudeModels(this.#cwd);
+      invalidateClaudeDiscovery(this.#cwd);
     }
     await stopClaude(this.#client);
   };
 
-  override onListModels = (
-    context: AgentListModelsContext,
-  ): Promise<AgentModel[]> =>
-    listAgentModels(this.#client, this.#processes, context.cwd);
+  override onDiscover = (
+    context: AgentDiscoveryContext,
+  ): Promise<AgentDiscovery> =>
+    discoverAgent(this.#client, this.#processes, context);
 
   override onAcp = (frame: JsonValue): Promise<void> | void =>
     forwardAcpFrame(this.#client, frame);
@@ -117,7 +117,7 @@ class ClaudeAgentPlugin extends AgentPlugin {
     this.#log.info("plugin deactivating; stopping the adapter", {
       context: { cwd: this.#cwd, adapterRunning: this.#client.running },
     });
-    invalidateAllClaudeModels();
+    invalidateAllClaudeDiscovery();
     await this.#client.stop();
   }
 }

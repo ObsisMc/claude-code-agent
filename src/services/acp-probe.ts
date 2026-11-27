@@ -15,11 +15,18 @@ const probeLog = logger("claude-agent-acp.probe");
  * slow `initialize` cannot be followed by an equally slow `session/new` and overrun the host's own
  * deadline — which would fail discovery with a timeout naming the host instead of the adapter.
  */
-const PROBE_BUDGET_MS = 40_000;
+export const PROBE_BUDGET_MS = 40_000;
 
 /** One probe request still waiting for the adapter's answer, keyed by its JSON-RPC id. */
 interface PendingCall {
   resolve: (result: JsonValue) => void;
+  reject: (error: Error) => void;
+}
+
+/** One notification the caller is waiting for, until the conversation ends. */
+interface NotificationWatch {
+  matches: (params: JsonValue) => boolean;
+  resolve: (params: JsonValue) => void;
   reject: (error: Error) => void;
 }
 
@@ -48,14 +55,15 @@ export class AcpProbeError extends Error {
 export class AcpProbe {
   readonly #child: HostChildProcess;
   readonly #pending = new Map<number, PendingCall>();
+  readonly #watches = new Set<NotificationWatch>();
   readonly #deadline: number;
   #nextId = 1;
   /** Set once the adapter can no longer answer, so later calls fail instead of waiting forever. */
   #ended: Error | undefined;
 
-  private constructor(child: HostChildProcess, budgetMs: number) {
+  private constructor(child: HostChildProcess, deadline: number) {
     this.#child = child;
-    this.#deadline = Date.now() + budgetMs;
+    this.#deadline = deadline;
   }
 
   /**
@@ -68,9 +76,9 @@ export class AcpProbe {
    */
   static attach(
     child: HostChildProcess,
-    budgetMs: number = PROBE_BUDGET_MS,
+    deadline: number = Date.now() + PROBE_BUDGET_MS,
   ): AcpProbe {
-    const probe = new AcpProbe(child, budgetMs);
+    const probe = new AcpProbe(child, deadline);
     void probe.#pumpStdout();
     void probe.#pumpStderr();
     void child.exited.then(({ code, signal }) => {
@@ -83,8 +91,17 @@ export class AcpProbe {
     return probe;
   }
 
-  /** Sends one ACP request and resolves with its result, within the conversation's budget. */
-  async request(method: string, params: JsonValue): Promise<JsonValue> {
+  /**
+   * Sends one ACP request and resolves with its result, within the conversation's deadline.
+   *
+   * `deadline` replaces it for this one request: cleanup after the conversation keeps time of its
+   * own the conversation must not use.
+   */
+  async request(
+    method: string,
+    params: JsonValue,
+    deadline: number = this.#deadline,
+  ): Promise<JsonValue> {
     if (this.#ended !== undefined) {
       throw this.#ended;
     }
@@ -98,7 +115,22 @@ export class AcpProbe {
       this.#pending.delete(id);
       throw new AcpProbeError(`failed to send ${method}: ${describe(error)}`);
     }
-    return await this.#withinBudget(answered, id, method);
+    return await this.#withinDeadline(answered, id, method, deadline);
+  }
+
+  /**
+   * Resolves with the params of the first notification `matches` accepts from now on.
+   *
+   * Watch before sending the request that provokes it: an agent may notify before it answers. It
+   * rejects once the conversation ends without one, and is never resolved by a response.
+   */
+  notification(matches: (params: JsonValue) => boolean): Promise<JsonValue> {
+    if (this.#ended !== undefined) {
+      return Promise.reject(this.#ended);
+    }
+    return new Promise((resolve, reject) => {
+      this.#watches.add({ matches, resolve, reject });
+    });
   }
 
   /** Kills the probed process; idempotent, and safe on one that already exited. */
@@ -113,21 +145,20 @@ export class AcpProbe {
   }
 
   /** Fails one pending call once the conversation's shared deadline passes. */
-  #withinBudget(
+  #withinDeadline(
     answered: Promise<JsonValue>,
     id: number,
     method: string,
+    deadline: number,
   ): Promise<JsonValue> {
-    const remaining = Math.max(0, this.#deadline - Date.now());
+    const remaining = Math.max(0, deadline - Date.now());
     let timer: number | undefined;
     const expiry = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(
           new AcpProbeError(
-            `${method} did not answer within the probe's ${
-              PROBE_BUDGET_MS / 1000
-            }s budget`,
+            `${method} did not answer before the probe's deadline`,
           ),
         );
       }, remaining);
@@ -141,13 +172,16 @@ export class AcpProbe {
       return;
     }
     if (typeof frame.method === "string") {
-      // The agent is asking the probe's client side for something. A probe advertises no client
-      // capabilities and has no user to prompt, so the only honest answer is a refusal — and it
-      // has to be sent, because an ACP request left unanswered stalls the handshake this probe is
-      // in the middle of rather than being quietly forgotten.
       const id = frame.id;
       if (typeof id === "number" || typeof id === "string") {
+        // The agent is asking the probe's client side for something. A probe advertises no
+        // client capabilities and has no user to prompt, so the only honest answer is a refusal —
+        // and it has to be sent, because an ACP request left unanswered stalls the handshake this
+        // probe is in the middle of rather than being quietly forgotten.
         void this.#refuse(id, frame.method);
+      } else {
+        // A notification, such as the command report discovery may be waiting for.
+        this.#notify(frame.params ?? null);
       }
       return;
     }
@@ -168,6 +202,16 @@ export class AcpProbe {
       return;
     }
     call.resolve(frame.result ?? null);
+  }
+
+  /** Hands one notification to every watch it matches; each watch takes only its first. */
+  #notify(params: JsonValue): void {
+    for (const watch of [...this.#watches]) {
+      if (watch.matches(params)) {
+        this.#watches.delete(watch);
+        watch.resolve(params);
+      }
+    }
   }
 
   /** Tells the agent this probe serves no client methods, without failing the conversation. */
@@ -240,6 +284,11 @@ export class AcpProbe {
     this.#pending.clear();
     for (const call of pending) {
       call.reject(this.#ended);
+    }
+    const watches = [...this.#watches];
+    this.#watches.clear();
+    for (const watch of watches) {
+      watch.reject(this.#ended);
     }
   }
 }
