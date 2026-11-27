@@ -15,10 +15,10 @@ pick it, and your conversation runs against the Claude Code CLI through its
 - Passes every model, session, and streaming feature Claude Code's adapter
   supports straight through to Ora's UI, including the in-session model picker
   (`default`, `sonnet`, `opus`, `haiku`, and Claude Fable).
-- Lets Ora show Claude Code's models, and its commands and Skills, before you
-  send the first message, by asking a short-lived adapter process
-  (`agent/discover`). If Claude Code reports no commands in time, Ora shows its
-  usual hint instead.
+- Lets Ora show Claude Code's models and commands before you send the first
+  message, by asking a short-lived adapter process (`agent/discover`); the probe
+  uses the same Skill input as a session. If Claude Code reports no commands in
+  time, Ora shows its usual hint instead.
 
 ## Requirements
 

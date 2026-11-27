@@ -425,11 +425,17 @@ reserve. Keep these distinctions:
   would answer a Skill change with commands from before it.
 - The cache lives in memory only, for five minutes; a failure is never cached,
   unknown commands are.
+- Only the probe session's own report counts: match it by the `sessionId`
+  `session/new` returned, and treat an answer without one as no report.
 - The handshake stops before the cleanup reserve, which `session/delete` uses.
+  Delete is bounded by `min(deadline, now + reserve)` less a kill margin, so a
+  hung delete still leaves time to kill the adapter and answer before the
+  deadline.
 
-`session/delete` is sent only when `initialize` advertised the capability —
-sending it unconditionally would earn a `method_not_found` on every discovery
-and clean up nothing.
+`session/delete` is sent only when `initialize` advertised the capability.
+`claude-agent-acp` does (`sessionCapabilities.delete`), so every probe deletes
+its session; the gate stays because an adapter without the capability would earn
+a `method_not_found` on every discovery and clean up nothing.
 
 Note that `onStart` and `onStop` both invalidate the answers for their `cwd`, so
 a start/stop cycle around a picker opening makes the next open pay full price.
