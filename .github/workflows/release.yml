@@ -99,7 +99,8 @@ jobs:
             printf 'built for. `manifest.toml` is the release form the marketplace index reads.\n'
             printf '\nRequires Ora Desktop ≥ 0.7.0 (the first stable release that includes '
             printf 'ora-space/desktop#827, commit `9f3ed63f`). On older Desktop builds this '
-            printf 'plugin delivers no Skills — upgrade Desktop first.\n'
+            printf 'plugin delivers no Skills and shows no commands before the first message — '
+            printf 'upgrade Desktop first.\n'
           } > notes.md
           ASSETS=(dist/packages/*.orax dist/manifest.toml)
           # The static declaration copy only exists when the release bound one.

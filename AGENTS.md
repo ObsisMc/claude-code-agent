@@ -437,8 +437,10 @@ reserve. Keep these distinctions:
 its session; the gate stays because an adapter without the capability would earn
 a `method_not_found` on every discovery and clean up nothing.
 
-Note that `onStart` and `onStop` both invalidate the answers for their `cwd`, so
-a start/stop cycle around a picker opening makes the next open pay full price.
+`onStart` and `onStop` invalidate the answers for the connection's own `cwd`.
+Desktop starts the plugin in a neutral directory, not a Workspace, so this
+rarely clears a Workspace's answers: those simply expire within the five-minute
+window. The contract asks for nothing more.
 
 ## Protocol hygiene
 
@@ -471,7 +473,7 @@ deactivation), `host-call` (every `agent/*` method with duration and outcome),
 `lifecycle`, `acp` (frame envelopes only — `method` and `id`, never `params`),
 `claude-client` (spawn, pid, exit, pipe failures), `claude-agent-acp` (the live
 adapter's own stderr, one record per line at `info`; nothing on a platform
-route, where `claude-client` records only a line count), `models` and
+route, where `claude-client` records only a line count), `discovery` and
 `acp-probe` (discovery; the probe adapter's stderr is `claude-agent-acp.probe`
 at `debug`), and `command` (which adapter was resolved and how). ACP payloads
 are never logged: a `session/prompt` carries the user's text, and the log has no

@@ -10,8 +10,8 @@ const probeLog = logger("claude-agent-acp.probe");
 /**
  * How long one whole probe conversation may take before it is abandoned.
  *
- * Ora allows `agent/list_models` 60 seconds, and a probe has to spawn the adapter and complete an
- * ACP handshake inside that. The budget covers the conversation rather than each request, so a
+ * Ora gives `agent/discover` a deadline (60 seconds today), and discovery caps the conversation
+ * further at that deadline less the cleanup reserve. The budget covers the conversation rather than each request, so a
  * slow `initialize` cannot be followed by an equally slow `session/new` and overrun the host's own
  * deadline — which would fail discovery with a timeout naming the host instead of the adapter.
  */
