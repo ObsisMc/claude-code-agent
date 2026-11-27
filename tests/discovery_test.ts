@@ -92,7 +92,7 @@ Deno.test("commands are the probe session's first report, in the agent's order",
 Deno.test("a report that arrives before session/new answers counts", async () => {
   const discovery = await discoverClaude(
     fakeProcesses(defaultAcpAgent, [], {
-      before: commandReport([{ name: "review", description: "Review" }]),
+      before: [commandReport([{ name: "review", description: "Review" }])],
     }),
     withCommands(uniqueWorkspace()),
   );
@@ -198,10 +198,10 @@ Deno.test("an answer is reused only for the same input, Skills revision included
 Deno.test("only the probe session's own report counts", async () => {
   const discovery = await discoverClaude(
     fakeProcesses(defaultAcpAgent, [], {
-      before: commandReport(
+      before: [commandReport(
         [{ name: "elsewhere", description: "Another session" }],
         "other-session",
-      ),
+      )],
       after: commandReport([{ name: "review", description: "Review" }]),
     }),
     withCommands(uniqueWorkspace()),
@@ -384,6 +384,41 @@ Deno.test("starting or stopping the agent drops its workspace's answers", async 
   }
 });
 
+Deno.test("of two reports for the probe session, the first one wins", async () => {
+  const discovery = await discoverClaude(
+    fakeProcesses(defaultAcpAgent, [], {
+      before: [
+        commandReport([{ name: "first", description: "First" }]),
+        commandReport([{ name: "second", description: "Second" }]),
+      ],
+    }),
+    withCommands(uniqueWorkspace()),
+  );
+  assertEquals(discovery.commands, [{ name: "first", description: "First" }]);
+});
+
+Deno.test("a quick models-only probe whose delete hangs answers within the cleanup reserve", async () => {
+  const kills = { count: 0 };
+  const started = Date.now();
+  // Ora's own sixty seconds: the deadline alone would let the hung delete run almost all of it.
+  const discovery = await discoverClaude(
+    fakeProcesses(
+      (request): JsonValue | Scripted =>
+        request.method === "initialize"
+          ? CLAUDE_ACP_INITIALIZE
+          : request.method === "session/delete"
+          ? NO_ANSWER
+          : defaultAcpAgent(request),
+      [],
+      { kills },
+    ),
+    { ...modelsOnly(uniqueWorkspace()), deadline: started + 60_000 },
+  );
+  assertEquals(discovery.models.length, 3);
+  assertEquals(Date.now() - started < AGENT_DISCOVERY_CLEANUP_RESERVE_MS, true);
+  assertEquals(kills.count, 1);
+});
+
 /** A `session/new` answer without the id of the session it opened. */
 function withoutSessionId(answer: JsonValue): JsonValue {
   const { sessionId: _, ...rest } = answer as Record<string, JsonValue>;
@@ -471,7 +506,8 @@ function fakeProcesses(
   respond: (request: Record<string, JsonValue>) => JsonValue | Scripted,
   spawns: HostChildProcessOptions[] = [],
   notifications: {
-    before?: JsonValue;
+    /** Sent, in order, before the `session/new` answer. */
+    before?: JsonValue[];
     after?: JsonValue;
     /** How long after the `session/new` answer `after` is sent. */
     afterDelayMs?: number;
@@ -510,8 +546,8 @@ function fakeProcesses(
             if (line.trim() === "") continue;
             const request = JSON.parse(line) as Record<string, JsonValue>;
             const opensSession = request.method === "session/new";
-            if (opensSession && notifications.before !== undefined) {
-              emit(notifications.before);
+            if (opensSession) {
+              notifications.before?.forEach(emit);
             }
             const answer = respond(request);
             if (answer === NO_ANSWER) {
